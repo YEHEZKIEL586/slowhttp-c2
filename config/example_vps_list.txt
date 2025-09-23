@@ -1,0 +1,85 @@
+# Distributed Slow HTTP C2 - Example VPS List
+# This file shows the format for bulk VPS import (future feature)
+#
+# Format: IP_ADDRESS,USERNAME,PASSWORD,SSH_PORT,LOCATION
+# Lines starting with # are comments and will be ignored
+# Empty lines are also ignored
+
+# Example VPS configurations:
+# Replace these with your actual VPS details
+
+# US-East Region VPS
+1.2.3.4,root,your_secure_password_1,22,US-East-Virginia
+5.6.7.8,root,your_secure_password_2,22,US-East-NewYork
+
+# EU-West Region VPS  
+9.10.11.12,root,your_secure_password_3,22,EU-West-London
+13.14.15.16,root,your_secure_password_4,22,EU-West-Ireland
+
+# Asia-Pacific Region VPS
+17.18.19.20,root,your_secure_password_5,22,APAC-Singapore  
+21.22.23.24,root,your_secure_password_6,22,APAC-Tokyo
+
+# Custom SSH port examples
+25.26.27.28,admin,custom_password_7,2222,US-West-California
+29.30.31.32,ubuntu,custom_password_8,2200,EU-Central-Frankfurt
+
+# Different username examples
+33.34.35.36,vpsuser,another_password_9,22,APAC-Sydney
+37.38.39.40,server,final_password_10,22,US-Central-Texas
+
+# SECURITY NOTES:
+# ================
+# 1. NEVER commit this file with real passwords to version control
+# 2. Use strong, unique passwords for each VPS
+# 3. Consider using SSH keys instead of passwords for better security
+# 4. Regularly rotate VPS credentials
+# 5. Only use VPS that you own or have explicit permission to test
+
+# USAGE:
+# ======
+# This file format is for future bulk import functionality
+# Currently, you need to add VPS nodes through the TUI interface:
+# 1. Start the C2: ./start.sh
+# 2. Select [1] VPS Management
+# 3. Select [1] Add VPS
+# 4. Enter details for each VPS manually
+
+# RECOMMENDED VPS SPECIFICATIONS:
+# ===============================
+# Minimum: 1 CPU, 1GB RAM, 10GB Storage
+# Recommended: 2+ CPU, 2GB+ RAM, 20GB+ Storage
+# Network: Unrestricted outbound connections
+# OS: Any modern Linux distribution (Ubuntu, CentOS, Debian)
+# SSH: Root access or sudo privileges required
+
+# PROVIDER EXAMPLES:
+# ==================
+# - DigitalOcean Droplets
+# - AWS EC2 Instances  
+# - Google Cloud Compute Engine
+# - Linode VPS
+# - Vultr Instances
+# - Azure Virtual Machines
+# - Hetzner Cloud Servers
+
+# GEOGRAPHIC DISTRIBUTION:
+# ========================
+# For best results, distribute VPS across:
+# - Multiple regions (US, EU, Asia)
+# - Multiple providers (avoid single point of failure)  
+# - Multiple IP ranges (avoid IP-based blocking)
+
+# COST CONSIDERATIONS:
+# ====================
+# - Use smallest instance sizes for testing
+# - Hourly billing recommended for short-term tests
+# - Consider spot/preemptible instances for cost savings
+# - Monitor bandwidth usage and costs
+
+# LEGAL REMINDER:
+# ===============
+# ⚠️  ONLY USE VPS YOU OWN OR HAVE EXPLICIT PERMISSION TO USE
+# ⚠️  OBTAIN WRITTEN AUTHORIZATION BEFORE TESTING ANY TARGETS
+# ⚠️  FOLLOW ALL APPLICABLE LAWS AND REGULATIONS
+# ⚠️  USE ONLY FOR EDUCATIONAL AND AUTHORIZED SECURITY TESTING
