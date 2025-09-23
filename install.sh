@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Distributed Slow HTTP C2 - GitHub Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/yourusername/slowhttp-c2/main/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
 
 set -e
 
@@ -29,19 +29,19 @@ print_banner() {
     echo "║                           GitHub Installation                               ║"
     echo "╚══════════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
-    echo -e "${RED}⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️${NC}"
-    echo -e "${RED}   Unauthorized use against systems you don't own is ILLEGAL!${NC}"
+    echo -e "${RED}⚠️  PERINGATAN: HANYA UNTUK PENDIDIKAN DAN TESTING YANG DIOTORISASI! ⚠️${NC}"
+    echo -e "${RED}   Penggunaan tanpa izin pada sistem yang bukan milik Anda adalah ILEGAL!${NC}"
     echo ""
 }
 
 # Check if running as root
 check_user() {
     if [[ $EUID -eq 0 ]]; then
-        echo -e "${YELLOW}[WARNING] Running as root. Consider using a regular user.${NC}"
-        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo -e "${YELLOW}[PERINGATAN] Berjalan sebagai root. Pertimbangkan menggunakan user biasa.${NC}"
+        read -p "Lanjutkan saja? (y/N): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo -e "${RED}Installation cancelled${NC}"
+            echo -e "${RED}Instalasi dibatalkan${NC}"
             exit 1
         fi
     fi
@@ -55,56 +55,56 @@ detect_os() {
             PKG_MANAGER="apt"
             PKG_UPDATE="apt update"
             PKG_INSTALL="apt install -y"
-            echo -e "${GREEN}[INFO] Detected Debian/Ubuntu system${NC}"
+            echo -e "${GREEN}[INFO] Terdeteksi sistem Debian/Ubuntu${NC}"
         elif [ -f /etc/redhat-release ]; then
             OS="redhat"
             PKG_MANAGER="yum"
             PKG_UPDATE="yum update -y"
             PKG_INSTALL="yum install -y"
-            echo -e "${GREEN}[INFO] Detected RedHat/CentOS system${NC}"
+            echo -e "${GREEN}[INFO] Terdeteksi sistem RedHat/CentOS${NC}"
         elif [ -f /etc/arch-release ]; then
             OS="arch"
             PKG_MANAGER="pacman"
             PKG_UPDATE="pacman -Sy"
             PKG_INSTALL="pacman -S --noconfirm"
-            echo -e "${GREEN}[INFO] Detected Arch Linux system${NC}"
+            echo -e "${GREEN}[INFO] Terdeteksi sistem Arch Linux${NC}"
         else
             OS="linux"
-            echo -e "${YELLOW}[WARNING] Generic Linux detected, may need manual dependency installation${NC}"
+            echo -e "${YELLOW}[PERINGATAN] Linux generik terdeteksi, mungkin perlu instalasi manual dependency${NC}"
         fi
     elif [[ "$OSTYPE" == "darwin"* ]]; then
         OS="macos"
-        echo -e "${GREEN}[INFO] Detected macOS system${NC}"
+        echo -e "${GREEN}[INFO] Terdeteksi sistem macOS${NC}"
     else
         OS="unknown"
-        echo -e "${YELLOW}[WARNING] Unknown operating system detected${NC}"
+        echo -e "${YELLOW}[PERINGATAN] Sistem operasi tidak dikenali${NC}"
     fi
 }
 
 # Check Python version
 check_python() {
-    echo -e "${BLUE}[CHECK] Checking Python installation...${NC}"
+    echo -e "${BLUE}[CEK] Memeriksa instalasi Python...${NC}"
     
     if command -v python3 &> /dev/null; then
         PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-        echo -e "${GREEN}[INFO] Python ${PYTHON_VERSION} found${NC}"
+        echo -e "${GREEN}[INFO] Python ${PYTHON_VERSION} ditemukan${NC}"
         
         # Check if version is sufficient
         if python3 -c "import sys; exit(0 if sys.version_info >= (3, 6) else 1)"; then
-            echo -e "${GREEN}[INFO] Python version is sufficient${NC}"
+            echo -e "${GREEN}[INFO] Versi Python sudah cukup${NC}"
         else
-            echo -e "${RED}[ERROR] Python ${PYTHON_MIN_VERSION}+ required, found ${PYTHON_VERSION}${NC}"
+            echo -e "${RED}[ERROR] Python ${PYTHON_MIN_VERSION}+ diperlukan, ditemukan ${PYTHON_VERSION}${NC}"
             exit 1
         fi
     else
-        echo -e "${YELLOW}[WARNING] Python3 not found, will install...${NC}"
+        echo -e "${YELLOW}[PERINGATAN] Python3 tidak ditemukan, akan diinstal...${NC}"
         INSTALL_PYTHON=true
     fi
 }
 
 # Install system dependencies
 install_dependencies() {
-    echo -e "${BLUE}[INSTALL] Installing system dependencies...${NC}"
+    echo -e "${BLUE}[INSTALL] Menginstal dependency sistem...${NC}"
     
     case $OS in
         "debian")
@@ -121,13 +121,13 @@ install_dependencies() {
             ;;
         "macos")
             if ! command -v brew &> /dev/null; then
-                echo -e "${BLUE}[INSTALL] Installing Homebrew...${NC}"
-                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/YEHEZKIEL586/slowhttp-c2/main/install.sh)"
+                echo -e "${BLUE}[INSTALL] Menginstal Homebrew...${NC}"
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
             fi
             brew install python3 git curl wget
             ;;
         *)
-            echo -e "${YELLOW}[WARNING] Please install python3, pip, git, curl manually${NC}"
+            echo -e "${YELLOW}[PERINGATAN] Silakan instal python3, pip, git, curl secara manual${NC}"
             ;;
     esac
 }
@@ -135,15 +135,15 @@ install_dependencies() {
 # Check if git is available
 check_git() {
     if ! command -v git &> /dev/null; then
-        echo -e "${RED}[ERROR] Git is required but not installed${NC}"
-        echo -e "${YELLOW}[INFO] Installing git...${NC}"
+        echo -e "${RED}[ERROR] Git diperlukan tapi tidak terinstal${NC}"
+        echo -e "${YELLOW}[INFO] Menginstal git...${NC}"
         
         case $OS in
             "debian") sudo apt install -y git ;;
             "redhat") sudo yum install -y git ;;
             "arch") sudo pacman -S --noconfirm git ;;
             "macos") brew install git ;;
-            *) echo -e "${RED}[ERROR] Please install git manually${NC}"; exit 1 ;;
+            *) echo -e "${RED}[ERROR] Silakan instal git secara manual${NC}"; exit 1 ;;
         esac
     fi
 }
@@ -154,24 +154,24 @@ download_repo() {
     
     # Remove existing directory if it exists
     if [ -d "$INSTALL_DIR" ]; then
-        echo -e "${YELLOW}[WARNING] Directory $INSTALL_DIR already exists${NC}"
-        read -p "Remove existing installation? (y/N): " -n 1 -r
+        echo -e "${YELLOW}[PERINGATAN] Direktori $INSTALL_DIR sudah ada${NC}"
+        read -p "Hapus instalasi yang sudah ada? (y/N): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             rm -rf "$INSTALL_DIR"
-            echo -e "${GREEN}[INFO] Removed existing directory${NC}"
+            echo -e "${GREEN}[INFO] Direktori yang ada telah dihapus${NC}"
         else
-            echo -e "${RED}[ERROR] Installation cancelled${NC}"
+            echo -e "${RED}[ERROR] Instalasi dibatalkan${NC}"
             exit 1
         fi
     fi
     
     # Clone repository
     if git clone "$REPO_URL" "$INSTALL_DIR"; then
-        echo -e "${GREEN}[SUCCESS] Repository cloned successfully${NC}"
+        echo -e "${GREEN}[BERHASIL] Repository berhasil di-clone${NC}"
     else
-        echo -e "${RED}[ERROR] Failed to clone repository${NC}"
-        echo -e "${YELLOW}[INFO] You can also download manually from: $REPO_URL${NC}"
+        echo -e "${RED}[ERROR] Gagal clone repository${NC}"
+        echo -e "${YELLOW}[INFO] Anda juga bisa download manual dari: $REPO_URL${NC}"
         exit 1
     fi
     
@@ -180,13 +180,13 @@ download_repo() {
 
 # Setup Python virtual environment
 setup_python_env() {
-    echo -e "${BLUE}[SETUP] Creating Python virtual environment...${NC}"
+    echo -e "${BLUE}[SETUP] Membuat Python virtual environment...${NC}"
     
     # Create virtual environment
     if python3 -m venv venv; then
-        echo -e "${GREEN}[SUCCESS] Virtual environment created${NC}"
+        echo -e "${GREEN}[BERHASIL] Virtual environment berhasil dibuat${NC}"
     else
-        echo -e "${RED}[ERROR] Failed to create virtual environment${NC}"
+        echo -e "${RED}[ERROR] Gagal membuat virtual environment${NC}"
         exit 1
     fi
     
@@ -194,16 +194,16 @@ setup_python_env() {
     source venv/bin/activate
     
     # Upgrade pip
-    echo -e "${BLUE}[SETUP] Upgrading pip...${NC}"
+    echo -e "${BLUE}[SETUP] Mengupgrade pip...${NC}"
     pip install --upgrade pip
     
     # Install Python dependencies
-    echo -e "${BLUE}[SETUP] Installing Python dependencies...${NC}"
+    echo -e "${BLUE}[SETUP] Menginstal dependency Python...${NC}"
     if pip install -r requirements.txt; then
-        echo -e "${GREEN}[SUCCESS] Python dependencies installed${NC}"
+        echo -e "${GREEN}[BERHASIL] Dependency Python berhasil diinstal${NC}"
     else
-        echo -e "${RED}[ERROR] Failed to install Python dependencies${NC}"
-        echo -e "${YELLOW}[INFO] You may need to install them manually:${NC}"
+        echo -e "${RED}[ERROR] Gagal menginstal dependency Python${NC}"
+        echo -e "${YELLOW}[INFO] Anda mungkin perlu menginstalnya secara manual:${NC}"
         echo -e "${YELLOW}pip install paramiko cryptography${NC}"
         exit 1
     fi
@@ -211,7 +211,7 @@ setup_python_env() {
 
 # Create launcher scripts
 create_launchers() {
-    echo -e "${BLUE}[SETUP] Creating launcher scripts...${NC}"
+    echo -e "${BLUE}[SETUP] Membuat script launcher...${NC}"
     
     # Make start.sh executable
     chmod +x start.sh
@@ -221,7 +221,7 @@ create_launchers() {
 #!/bin/bash
 cd "$(dirname "$0")"
 
-echo "🔄 Updating Distributed Slow HTTP C2..."
+echo "🔄 Mengupdate Distributed Slow HTTP C2..."
 
 # Pull latest changes
 git pull origin main
@@ -230,7 +230,7 @@ git pull origin main
 source venv/bin/activate
 pip install --upgrade -r requirements.txt
 
-echo "✅ Update completed!"
+echo "✅ Update selesai!"
 EOF
 
     # Create uninstaller
@@ -238,33 +238,33 @@ EOF
 #!/bin/bash
 cd "$(dirname "$0")"
 
-echo "🗑️  Uninstalling Distributed Slow HTTP C2..."
+echo "🗑️  Menguninstal Distributed Slow HTTP C2..."
 
-read -p "Are you sure you want to completely remove the installation? (y/N): " -n 1 -r
+read -p "Apakah Anda yakin ingin menghapus instalasi sepenuhnya? (y/N): " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     cd ..
     rm -rf "$(basename "$PWD")"
-    echo "✅ Uninstallation completed!"
+    echo "✅ Uninstall selesai!"
 else
-    echo "❌ Uninstallation cancelled"
+    echo "❌ Uninstall dibatalkan"
 fi
 EOF
 
     # Make scripts executable
     chmod +x update.sh uninstall.sh
     
-    echo -e "${GREEN}[SUCCESS] Launcher scripts created${NC}"
+    echo -e "${GREEN}[BERHASIL] Script launcher berhasil dibuat${NC}"
 }
 
 # Setup systemd service (optional)
 setup_service() {
     if [[ "$OS" == "debian" || "$OS" == "redhat" || "$OS" == "arch" ]]; then
-        read -p "Setup as system service? (y/N): " -n 1 -r
+        read -p "Setup sebagai system service? (y/N): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo -e "${BLUE}[SETUP] Creating systemd service...${NC}"
+            echo -e "${BLUE}[SETUP] Membuat systemd service...${NC}"
             
             SERVICE_FILE="/etc/systemd/system/slowhttp-c2.service"
             
@@ -289,10 +289,10 @@ EOF
             
             sudo systemctl daemon-reload
             
-            echo -e "${GREEN}[SUCCESS] Systemd service created${NC}"
+            echo -e "${GREEN}[BERHASIL] Systemd service berhasil dibuat${NC}"
             echo -e "${CYAN}[INFO] Enable service: sudo systemctl enable slowhttp-c2${NC}"
             echo -e "${CYAN}[INFO] Start service: sudo systemctl start slowhttp-c2${NC}"
-            echo -e "${CYAN}[INFO] View logs: sudo journalctl -u slowhttp-c2 -f${NC}"
+            echo -e "${CYAN}[INFO] Lihat logs: sudo journalctl -u slowhttp-c2 -f${NC}"
         fi
     fi
 }
@@ -343,51 +343,51 @@ local_config.py
 *~
 EOF
     
-    echo -e "${GREEN}[SUCCESS] Security measures applied${NC}"
+    echo -e "${GREEN}[BERHASIL] Security measures berhasil diterapkan${NC}"
 }
 
 # Final setup and instructions
 final_setup() {
-    echo -e "${GREEN}[SUCCESS] Installation completed successfully!${NC}"
+    echo -e "${GREEN}[BERHASIL] Instalasi berhasil diselesaikan!${NC}"
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║                           INSTALLATION COMPLETE                             ║${NC}"
+    echo -e "${CYAN}║                           INSTALASI SELESAI                                 ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${YELLOW}📂 Installation Directory: ${INSTALL_DIR}${NC}"
-    echo -e "${YELLOW}🚀 Start C2 System: ./start.sh${NC}"
+    echo -e "${YELLOW}📂 Direktori Instalasi: ${INSTALL_DIR}${NC}"
+    echo -e "${YELLOW}🚀 Jalankan C2 System: ./start.sh${NC}"
     echo -e "${YELLOW}🔄 Update Tool: ./update.sh${NC}"
     echo -e "${YELLOW}🗑️  Uninstall: ./uninstall.sh${NC}"
     echo ""
-    echo -e "${CYAN}Next Steps:${NC}"
-    echo "1. Change to installation directory: cd $INSTALL_DIR"
-    echo "2. Start the C2 system: ./start.sh"
-    echo "3. Add VPS nodes to your pool"
-    echo "4. Deploy agents to VPS nodes"
-    echo "5. Configure and launch attacks"
+    echo -e "${CYAN}Langkah Selanjutnya:${NC}"
+    echo "1. Pindah ke direktori instalasi: cd $INSTALL_DIR"
+    echo "2. Jalankan sistem C2: ./start.sh"
+    echo "3. Tambahkan VPS nodes ke pool Anda"
+    echo "4. Deploy agents ke VPS nodes"
+    echo "5. Konfigurasi dan luncurkan serangan"
     echo ""
     echo -e "${GREEN}Quick Start:${NC}"
     echo -e "${WHITE}cd $INSTALL_DIR && ./start.sh${NC}"
     echo ""
-    echo -e "${RED}⚠️  REMEMBER: Only use for authorized testing!${NC}"
+    echo -e "${RED}⚠️  INGAT: Hanya gunakan untuk testing yang diotorisasi!${NC}"
 }
 
 # Main installation function
 main() {
     print_banner
     
-    echo -e "${YELLOW}This will install the Distributed Slow HTTP C2 tool.${NC}"
-    echo -e "${YELLOW}The installation will create a directory at: $INSTALL_DIR${NC}"
+    echo -e "${YELLOW}Ini akan menginstal tool Distributed Slow HTTP C2.${NC}"
+    echo -e "${YELLOW}Instalasi akan membuat direktori di: $INSTALL_DIR${NC}"
     echo ""
-    read -p "Continue with installation? (y/N): " -n 1 -r
+    read -p "Lanjutkan dengan instalasi? (y/N): " -n 1 -r
     echo
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${RED}Installation cancelled${NC}"
+        echo -e "${RED}Instalasi dibatalkan${NC}"
         exit 1
     fi
     
-    echo -e "${BLUE}[START] Beginning installation process...${NC}"
+    echo -e "${BLUE}[MULAI] Memulai proses instalasi...${NC}"
     
     check_user
     detect_os
@@ -401,11 +401,11 @@ main() {
     setup_security
     final_setup
     
-    echo -e "${GREEN}[COMPLETE] Installation finished successfully!${NC}"
+    echo -e "${GREEN}[SELESAI] Instalasi berhasil diselesaikan!${NC}"
 }
 
 # Handle interruption
-trap 'echo -e "\n${RED}[INTERRUPTED] Installation cancelled by user${NC}"; exit 1' INT
+trap 'echo -e "\n${RED}[TERINTERUPSI] Instalasi dibatalkan oleh user${NC}"; exit 1' INT
 
 # Run main installation
 main "$@"
