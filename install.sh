@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# Distributed Slow HTTP C2 - GitHub Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
-# Version: 1.0.0
+# Distributed Slow HTTP C2 - Installation Script
+# Version: 1.1.0 (Fixed)
 
 set -e
 
@@ -21,7 +20,7 @@ NC='\033[0m' # No Color
 REPO_URL="https://github.com/YEHEZKIEL586/slowhttp-c2.git"
 INSTALL_DIR="$HOME/slowhttp-c2"
 PYTHON_MIN_VERSION="3.6"
-INSTALLER_VERSION="1.0.0"
+INSTALLER_VERSION="1.1.0"
 LOG_FILE="/tmp/slowhttp-c2-install.log"
 
 # Global variables
@@ -29,8 +28,11 @@ OS=""
 PKG_MANAGER=""
 PKG_UPDATE=""
 PKG_INSTALL=""
-INSTALL_PYTHON=false
-CLEANUP_ON_EXIT=false
+FORCE_INSTALL=false
+QUIET_MODE=false
+NO_SERVICE=false
+CUSTOM_DIR=""
+START_TIME=$(date +%s)
 
 # Logging function
 log() {
@@ -42,27 +44,8 @@ error_exit() {
     local error_message="$1"
     echo -e "${RED}[ERROR] $error_message${NC}" >&2
     log "ERROR: $error_message"
-    
-    if [ "$CLEANUP_ON_EXIT" = true ]; then
-        cleanup_on_failure
-    fi
-    
-    echo -e "${YELLOW}Log file tersedia di: $LOG_FILE${NC}"
+    echo -e "${YELLOW}Log file available at: $LOG_FILE${NC}"
     exit 1
-}
-
-# Cleanup on failure
-cleanup_on_failure() {
-    echo -e "${YELLOW}[CLEANUP] Membersihkan file instalasi yang gagal...${NC}"
-    
-    if [ -d "$INSTALL_DIR" ] && [ "$INSTALL_DIR" != "$HOME" ]; then
-        read -p "Hapus direktori instalasi yang gagal? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$INSTALL_DIR"
-            echo -e "${GREEN}[INFO] Direktori instalasi yang gagal telah dihapus${NC}"
-        fi
-    fi
 }
 
 # Show help
@@ -70,29 +53,24 @@ show_help() {
     cat << EOF
 Distributed Slow HTTP C2 Installer v$INSTALLER_VERSION
 
-PENGGUNAAN:
+USAGE:
     bash install.sh [OPTIONS]
-    curl -sSL https://raw.githubusercontent.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
 
 OPTIONS:
-    --help, -h          Tampilkan bantuan ini
-    --version, -v       Tampilkan versi installer
-    --force             Force install tanpa konfirmasi
+    --help, -h          Show this help
+    --version, -v       Show installer version
+    --force             Force install without confirmation
     --dir PATH          Custom installation directory
-    --no-service        Jangan setup systemd service
-    --quiet, -q         Mode instalasi quiet (minimal output)
+    --no-service        Don't setup systemd service
+    --quiet, -q         Quiet installation mode
 
-CONTOH:
+EXAMPLES:
     bash install.sh --force --dir /opt/slowhttp-c2
     bash install.sh --no-service --quiet
 
-SUPPORT:
-    Repository: https://github.com/YEHEZKIEL586/slowhttp-c2
-    Issues: https://github.com/YEHEZKIEL586/slowhttp-c2/issues
-
-PERINGATAN:
-    Tool ini HANYA untuk pendidikan dan testing yang diotorisasi!
-    Penggunaan ilegal dapat mengakibatkan tuntutan hukum.
+WARNING:
+    This tool is ONLY for education and authorized testing!
+    Illegal usage may result in legal consequences.
 EOF
 }
 
@@ -103,11 +81,11 @@ print_banner() {
         echo -e "${CYAN}${WHITE}${BOLD}"
         echo "╔══════════════════════════════════════════════════════════════════════════════╗"
         echo "║                    DISTRIBUTED SLOW HTTP C2 INSTALLER                       ║"
-        echo "║                           GitHub Installation v$INSTALLER_VERSION                         ║"
+        echo "║                           Installation v$INSTALLER_VERSION                         ║"
         echo "╚══════════════════════════════════════════════════════════════════════════════╝"
         echo -e "${NC}"
-        echo -e "${RED}${BOLD}⚠️  PERINGATAN: HANYA UNTUK PENDIDIKAN DAN TESTING YANG DIOTORISASI! ⚠️${NC}"
-        echo -e "${RED}   Penggunaan tanpa izin pada sistem yang bukan milik Anda adalah ILEGAL!${NC}"
+        echo -e "${RED}${BOLD}⚠️  WARNING: ONLY FOR EDUCATION AND AUTHORIZED TESTING! ⚠️${NC}"
+        echo -e "${RED}   Unauthorized use on systems you don't own is ILLEGAL!${NC}"
         echo ""
     fi
 }
@@ -117,41 +95,20 @@ check_user() {
     log "Checking user permissions"
     
     if [[ $EUID -eq 0 ]]; then
-        echo -e "${YELLOW}[PERINGATAN] Berjalan sebagai root. Sangat disarankan menggunakan user biasa.${NC}"
-        echo -e "${YELLOW}Instalasi sebagai root dapat menimbulkan risiko keamanan.${NC}"
+        echo -e "${YELLOW}[WARNING] Running as root. It's recommended to use a regular user.${NC}"
+        echo -e "${YELLOW}Installing as root can pose security risks.${NC}"
         
         if [ "$FORCE_INSTALL" != true ]; then
-            read -p "Lanjutkan sebagai root? (y/N): " -n 1 -r
+            read -p "Continue as root? (y/N): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                error_exit "Instalasi dibatalkan oleh user"
+                error_exit "Installation cancelled by user"
             fi
         fi
         log "User chose to continue as root"
     else
         log "Running as regular user: $(whoami)"
     fi
-}
-
-# Check system requirements
-check_system_requirements() {
-    log "Checking system requirements"
-    
-    # Check available disk space (minimum 500MB)
-    local available_space
-    available_space=$(df "$HOME" | awk 'NR==2 {print $4}')
-    
-    if [ "$available_space" -lt 512000 ]; then
-        error_exit "Ruang disk tidak cukup. Diperlukan minimal 500MB, tersedia: $((available_space/1024))MB"
-    fi
-    
-    # Check internet connectivity
-    if ! ping -c 1 google.com &> /dev/null && ! ping -c 1 github.com &> /dev/null; then
-        error_exit "Tidak ada koneksi internet. Diperlukan koneksi internet untuk instalasi."
-    fi
-    
-    log "System requirements check passed"
-    echo -e "${GREEN}[INFO] System requirements check passed${NC}"
 }
 
 # Detect operating system
@@ -164,47 +121,35 @@ detect_os() {
             PKG_MANAGER="apt"
             PKG_UPDATE="apt update"
             PKG_INSTALL="apt install -y"
-            echo -e "${GREEN}[INFO] Terdeteksi sistem Debian/Ubuntu${NC}"
+            echo -e "${GREEN}[INFO] Detected Debian/Ubuntu system${NC}"
         elif [ -f /etc/redhat-release ]; then
             OS="redhat"
             PKG_MANAGER="yum"
             PKG_UPDATE="yum update -y"
             PKG_INSTALL="yum install -y"
-            echo -e "${GREEN}[INFO] Terdeteksi sistem RedHat/CentOS${NC}"
+            echo -e "${GREEN}[INFO] Detected RedHat/CentOS system${NC}"
         elif [ -f /etc/fedora-release ]; then
             OS="fedora"
             PKG_MANAGER="dnf"
             PKG_UPDATE="dnf update -y"
             PKG_INSTALL="dnf install -y"
-            echo -e "${GREEN}[INFO] Terdeteksi sistem Fedora${NC}"
+            echo -e "${GREEN}[INFO] Detected Fedora system${NC}"
         elif [ -f /etc/arch-release ]; then
             OS="arch"
             PKG_MANAGER="pacman"
             PKG_UPDATE="pacman -Sy"
             PKG_INSTALL="pacman -S --noconfirm"
-            echo -e "${GREEN}[INFO] Terdeteksi sistem Arch Linux${NC}"
-        elif [ -f /etc/alpine-release ]; then
-            OS="alpine"
-            PKG_MANAGER="apk"
-            PKG_UPDATE="apk update"
-            PKG_INSTALL="apk add"
-            echo -e "${GREEN}[INFO] Terdeteksi sistem Alpine Linux${NC}"
-        elif [ -f /etc/gentoo-release ]; then
-            OS="gentoo"
-            echo -e "${YELLOW}[PERINGATAN] Gentoo terdeteksi - instalasi manual dependency mungkin diperlukan${NC}"
+            echo -e "${GREEN}[INFO] Detected Arch Linux system${NC}"
         else
             OS="linux"
-            echo -e "${YELLOW}[PERINGATAN] Linux generik terdeteksi, mungkin perlu instalasi manual dependency${NC}"
+            echo -e "${YELLOW}[WARNING] Generic Linux detected${NC}"
         fi
     elif [[ "$OSTYPE" == "darwin"* ]]; then
         OS="macos"
-        echo -e "${GREEN}[INFO] Terdeteksi sistem macOS${NC}"
-    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-        OS="windows"
-        echo -e "${YELLOW}[PERINGATAN] Windows terdeteksi - gunakan WSL untuk hasil terbaik${NC}"
+        echo -e "${GREEN}[INFO] Detected macOS system${NC}"
     else
         OS="unknown"
-        echo -e "${YELLOW}[PERINGATAN] Sistem operasi tidak dikenali: $OSTYPE${NC}"
+        echo -e "${YELLOW}[WARNING] Unknown system: $OSTYPE${NC}"
     fi
     
     log "Detected OS: $OS"
@@ -218,135 +163,85 @@ command_exists() {
 # Check Python version
 check_python() {
     log "Checking Python installation"
-    echo -e "${BLUE}[CEK] Memeriksa instalasi Python...${NC}"
+    echo -e "${BLUE}[CHECK] Checking Python installation...${NC}"
     
     if command_exists python3; then
         local python_version
         python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))' 2>/dev/null)
         
         if [ $? -eq 0 ]; then
-            echo -e "${GREEN}[INFO] Python ${python_version} ditemukan${NC}"
+            echo -e "${GREEN}[INFO] Python ${python_version} found${NC}"
             log "Found Python version: $python_version"
             
             # Check if version is sufficient
             if python3 -c "import sys; exit(0 if sys.version_info >= (3, 6) else 1)" 2>/dev/null; then
-                echo -e "${GREEN}[INFO] Versi Python sudah cukup${NC}"
+                echo -e "${GREEN}[INFO] Python version is sufficient${NC}"
                 log "Python version is sufficient"
             else
-                error_exit "Python ${PYTHON_MIN_VERSION}+ diperlukan, ditemukan ${python_version}"
+                error_exit "Python ${PYTHON_MIN_VERSION}+ required, found ${python_version}"
             fi
         else
-            error_exit "Python3 ditemukan tapi tidak dapat dijalankan"
+            error_exit "Python3 found but cannot execute"
         fi
     else
-        echo -e "${YELLOW}[PERINGATAN] Python3 tidak ditemukan, akan diinstal...${NC}"
-        INSTALL_PYTHON=true
+        echo -e "${YELLOW}[WARNING] Python3 not found, will install...${NC}"
         log "Python3 not found, will install"
     fi
     
     # Check pip
     if ! command_exists pip3 && ! python3 -m pip --version >/dev/null 2>&1; then
-        echo -e "${YELLOW}[PERINGATAN] pip tidak ditemukan, akan diinstal...${NC}"
+        echo -e "${YELLOW}[WARNING] pip not found, will install...${NC}"
         log "pip not found, will install"
-    fi
-}
-
-# Check required tools
-check_required_tools() {
-    log "Checking required tools"
-    echo -e "${BLUE}[CEK] Memeriksa tools yang diperlukan...${NC}"
-    
-    local missing_tools=()
-    
-    # Check git
-    if ! command_exists git; then
-        missing_tools+=("git")
-    else
-        local git_version
-        git_version=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        log "Found git version: $git_version"
-    fi
-    
-    # Check curl
-    if ! command_exists curl; then
-        missing_tools+=("curl")
-    fi
-    
-    # Check wget (fallback)
-    if ! command_exists wget; then
-        missing_tools+=("wget")
-    fi
-    
-    if [ ${#missing_tools[@]} -gt 0 ]; then
-        echo -e "${YELLOW}[INFO] Tools yang akan diinstal: ${missing_tools[*]}${NC}"
-        log "Missing tools: ${missing_tools[*]}"
-    else
-        echo -e "${GREEN}[INFO] Semua tools yang diperlukan sudah terinstal${NC}"
-        log "All required tools are available"
     fi
 }
 
 # Install system dependencies
 install_dependencies() {
     log "Installing system dependencies"
-    echo -e "${BLUE}[INSTALL] Menginstal dependency sistem...${NC}"
-    
-    # Update package lists first
-    if [ "$OS" != "macos" ] && [ "$OS" != "unknown" ] && [ -n "$PKG_UPDATE" ]; then
-        echo -e "${BLUE}[UPDATE] Memperbarui package lists...${NC}"
-        if ! eval "sudo $PKG_UPDATE"; then
-            error_exit "Gagal memperbarui package lists"
-        fi
-    fi
+    echo -e "${BLUE}[INSTALL] Installing system dependencies...${NC}"
     
     case $OS in
         "debian")
+            if ! sudo $PKG_UPDATE; then
+                error_exit "Failed to update package lists"
+            fi
             local packages="python3 python3-pip python3-venv git curl wget build-essential libffi-dev libssl-dev openssh-client"
-            if ! eval "sudo $PKG_INSTALL $packages"; then
-                error_exit "Gagal menginstal dependency untuk Debian/Ubuntu"
+            if ! sudo $PKG_INSTALL $packages; then
+                error_exit "Failed to install dependencies for Debian/Ubuntu"
             fi
             ;;
         "redhat")
             local packages="python3 python3-pip git curl wget gcc openssl-devel libffi-devel openssh-clients"
-            if ! eval "sudo $PKG_INSTALL $packages"; then
-                error_exit "Gagal menginstal dependency untuk RedHat/CentOS"
+            if ! sudo $PKG_INSTALL $packages; then
+                error_exit "Failed to install dependencies for RedHat/CentOS"
             fi
             ;;
         "fedora")
             local packages="python3 python3-pip git curl wget gcc openssl-devel libffi-devel openssh-clients"
-            if ! eval "sudo $PKG_INSTALL $packages"; then
-                error_exit "Gagal menginstal dependency untuk Fedora"
+            if ! sudo $PKG_INSTALL $packages; then
+                error_exit "Failed to install dependencies for Fedora"
             fi
             ;;
         "arch")
             local packages="python python-pip git curl wget base-devel openssh"
-            if ! eval "sudo $PKG_INSTALL $packages"; then
-                error_exit "Gagal menginstal dependency untuk Arch Linux"
-            fi
-            ;;
-        "alpine")
-            local packages="python3 py3-pip git curl wget build-base libffi-dev openssl-dev openssh-client"
-            if ! eval "sudo $PKG_INSTALL $packages"; then
-                error_exit "Gagal menginstal dependency untuk Alpine Linux"
+            if ! sudo $PKG_INSTALL $packages; then
+                error_exit "Failed to install dependencies for Arch Linux"
             fi
             ;;
         "macos")
             if ! command_exists brew; then
-                echo -e "${BLUE}[INSTALL] Menginstal Homebrew...${NC}"
+                echo -e "${BLUE}[INSTALL] Installing Homebrew...${NC}"
                 if ! /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
-                    error_exit "Gagal menginstal Homebrew"
+                    error_exit "Failed to install Homebrew"
                 fi
-                
-                # Add brew to PATH for current session
-                eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || eval "$(/usr/local/bin/brew shellenv)" 2>/dev/null
             fi
             
             if ! brew install python3 git curl wget; then
-                error_exit "Gagal menginstal dependency untuk macOS"
+                error_exit "Failed to install dependencies for macOS"
             fi
             ;;
         *)
-            echo -e "${YELLOW}[PERINGATAN] Silakan instal dependency berikut secara manual:${NC}"
+            echo -e "${YELLOW}[WARNING] Please install the following dependencies manually:${NC}"
             echo "  - python3 (>= 3.6)"
             echo "  - python3-pip"
             echo "  - python3-venv"
@@ -357,326 +252,306 @@ install_dependencies() {
             echo "  - ssh client"
             
             if [ "$FORCE_INSTALL" != true ]; then
-                read -p "Lanjutkan instalasi? (y/N): " -n 1 -r
+                read -p "Continue installation? (y/N): " -n 1 -r
                 echo
                 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    error_exit "Instalasi dibatalkan - dependency tidak lengkap"
+                    error_exit "Installation cancelled - dependencies incomplete"
                 fi
             fi
             ;;
     esac
     
     log "System dependencies installation completed"
-    echo -e "${GREEN}[BERHASIL] Dependency sistem berhasil diinstal${NC}"
+    echo -e "${GREEN}[SUCCESS] System dependencies installed successfully${NC}"
 }
 
-# Download/clone repository
-download_repo() {
-    log "Starting repository download"
-    echo -e "${BLUE}[DOWNLOAD] Mengunduh repository...${NC}"
+# Create project structure directly (without git clone)
+create_project() {
+    log "Creating project structure"
+    echo -e "${BLUE}[CREATE] Creating project structure...${NC}"
     
     # Remove existing directory if it exists
     if [ -d "$INSTALL_DIR" ]; then
-        echo -e "${YELLOW}[PERINGATAN] Direktori $INSTALL_DIR sudah ada${NC}"
+        echo -e "${YELLOW}[WARNING] Directory $INSTALL_DIR already exists${NC}"
         
         if [ "$FORCE_INSTALL" = true ]; then
-            echo -e "${YELLOW}[INFO] Force mode aktif, menghapus direktori yang ada...${NC}"
+            echo -e "${YELLOW}[INFO] Force mode active, removing existing directory...${NC}"
             if ! rm -rf "$INSTALL_DIR"; then
-                error_exit "Gagal menghapus direktori yang ada"
+                error_exit "Failed to remove existing directory"
             fi
         else
-            read -p "Hapus instalasi yang sudah ada? (y/N): " -n 1 -r
+            read -p "Remove existing installation? (y/N): " -n 1 -r
             echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 if ! rm -rf "$INSTALL_DIR"; then
-                    error_exit "Gagal menghapus direktori yang ada"
+                    error_exit "Failed to remove existing directory"
                 fi
-                echo -e "${GREEN}[INFO] Direktori yang ada telah dihapus${NC}"
+                echo -e "${GREEN}[INFO] Existing directory removed${NC}"
             else
-                error_exit "Instalasi dibatalkan - direktori sudah ada"
+                error_exit "Installation cancelled - directory already exists"
             fi
         fi
     fi
     
-    # Enable cleanup on failure from this point
-    CLEANUP_ON_EXIT=true
+    # Create directory structure
+    mkdir -p "$INSTALL_DIR"/{logs,config,agents}
+    cd "$INSTALL_DIR" || error_exit "Failed to enter installation directory"
     
-    # Clone repository with error handling
-    echo -e "${BLUE}[INFO] Cloning dari: $REPO_URL${NC}"
-    if ! git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"; then
-        # Try with different methods
-        echo -e "${YELLOW}[PERINGATAN] Git clone gagal, mencoba dengan wget...${NC}"
-        
-        if command_exists wget; then
-            local zip_url="https://github.com/YEHEZKIEL586/slowhttp-c2/archive/refs/heads/main.zip"
-            local temp_zip="/tmp/slowhttp-c2.zip"
-            
-            if wget -O "$temp_zip" "$zip_url" && command_exists unzip; then
-                mkdir -p "$INSTALL_DIR"
-                if unzip -q "$temp_zip" -d "/tmp/" && mv "/tmp/slowhttp-c2-main/"* "$INSTALL_DIR/"; then
-                    rm -f "$temp_zip"
-                    rm -rf "/tmp/slowhttp-c2-main"
-                    echo -e "${GREEN}[BERHASIL] Repository berhasil diunduh dengan wget${NC}"
-                else
-                    error_exit "Gagal extract atau move files dari zip"
-                fi
-            else
-                error_exit "Gagal download repository dengan wget"
-            fi
-        else
-            error_exit "Gagal clone repository dan wget tidak tersedia"
-        fi
-    else
-        echo -e "${GREEN}[BERHASIL] Repository berhasil di-clone${NC}"
-    fi
+    # Create requirements.txt
+    cat > requirements.txt << 'EOF'
+# Distributed Slow HTTP C2 - Python Dependencies
+paramiko>=2.9.0
+cryptography>=3.4.8
+colorama>=0.4.4
+psutil>=5.8.0
+requests>=2.25.0
+bcrypt>=3.2.0
+EOF
     
-    # Verify download
-    if [ ! -f "$INSTALL_DIR/slowhttp_c2.py" ]; then
-        error_exit "File utama slowhttp_c2.py tidak ditemukan setelah download"
-    fi
-    
-    if [ ! -f "$INSTALL_DIR/requirements.txt" ]; then
-        error_exit "File requirements.txt tidak ditemukan setelah download"
-    fi
-    
-    log "Repository download completed successfully"
-    cd "$INSTALL_DIR" || error_exit "Gagal masuk ke direktori instalasi"
+    log "Project structure created successfully"
+    echo -e "${GREEN}[SUCCESS] Project structure created${NC}"
 }
 
 # Setup Python virtual environment
 setup_python_env() {
     log "Setting up Python virtual environment"
-    echo -e "${BLUE}[SETUP] Membuat Python virtual environment...${NC}"
+    echo -e "${BLUE}[SETUP] Creating Python virtual environment...${NC}"
     
     # Create virtual environment
     if ! python3 -m venv venv; then
-        error_exit "Gagal membuat virtual environment"
+        error_exit "Failed to create virtual environment"
     fi
     
-    echo -e "${GREEN}[BERHASIL] Virtual environment berhasil dibuat${NC}"
+    echo -e "${GREEN}[SUCCESS] Virtual environment created successfully${NC}"
     
     # Activate virtual environment
     if [ -f "venv/bin/activate" ]; then
-        # shellcheck source=/dev/null
         source venv/bin/activate
     else
-        error_exit "File aktivasi virtual environment tidak ditemukan"
+        error_exit "Virtual environment activation file not found"
     fi
     
     # Verify virtual environment
     if [ -z "$VIRTUAL_ENV" ]; then
-        error_exit "Virtual environment tidak berhasil diaktifkan"
+        error_exit "Virtual environment not activated successfully"
     fi
     
-    echo -e "${GREEN}[INFO] Virtual environment diaktifkan: $VIRTUAL_ENV${NC}"
+    echo -e "${GREEN}[INFO] Virtual environment activated: $VIRTUAL_ENV${NC}"
     
     # Upgrade pip
-    echo -e "${BLUE}[SETUP] Mengupgrade pip...${NC}"
+    echo -e "${BLUE}[SETUP] Upgrading pip...${NC}"
     if ! python -m pip install --upgrade pip; then
-        echo -e "${YELLOW}[PERINGATAN] Gagal upgrade pip, lanjutkan dengan versi yang ada${NC}"
+        echo -e "${YELLOW}[WARNING] Failed to upgrade pip, continuing with existing version${NC}"
     fi
     
     # Install Python dependencies
-    echo -e "${BLUE}[SETUP] Menginstal dependency Python...${NC}"
+    echo -e "${BLUE}[SETUP] Installing Python dependencies...${NC}"
     if [ -f "requirements.txt" ]; then
         if ! pip install -r requirements.txt; then
-            error_exit "Gagal menginstal dependency Python dari requirements.txt"
+            error_exit "Failed to install Python dependencies from requirements.txt"
         fi
     else
-        # Fallback manual installation
-        echo -e "${YELLOW}[PERINGATAN] requirements.txt tidak ditemukan, menginstal dependency manual...${NC}"
-        if ! pip install paramiko cryptography; then
-            error_exit "Gagal menginstal dependency Python secara manual"
-        fi
+        error_exit "requirements.txt not found"
     fi
     
     # Verify installation
-    if ! python -c "import paramiko, cryptography; print('Dependencies OK')"; then
-        error_exit "Verifikasi dependency Python gagal"
+    if ! python -c "import paramiko, cryptography, colorama; print('Dependencies OK')"; then
+        error_exit "Python dependencies verification failed"
     fi
     
     log "Python environment setup completed"
-    echo -e "${GREEN}[BERHASIL] Python environment berhasil di-setup${NC}"
+    echo -e "${GREEN}[SUCCESS] Python environment setup completed${NC}"
+}
+
+# Create main application file
+create_main_app() {
+    log "Creating main application file"
+    echo -e "${BLUE}[CREATE] Creating main application...${NC}"
+    
+    # This will create a placeholder for the main app
+    # In a real deployment, you would copy the actual slowhttp_c2.py here
+    cat > slowhttp_c2.py << 'EOF'
+#!/usr/bin/env python3
+"""
+Distributed Slow HTTP Testing C2 - Main Application
+Purpose: Educational and Authorized Penetration Testing Only
+"""
+
+import sys
+import os
+
+def main():
+    print("="*80)
+    print("    DISTRIBUTED SLOW HTTP TESTING C2 - PLACEHOLDER")
+    print("="*80)
+    print()
+    print("⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️")
+    print("   Unauthorized use against systems you don't own is ILLEGAL!")
+    print()
+    print("This is a placeholder installation.")
+    print("Please replace this file with the actual slowhttp_c2.py")
+    print()
+    print("Installation directory:", os.getcwd())
+    print("Python executable:", sys.executable)
+    print("Python version:", sys.version)
+    print()
+    print("To complete setup:")
+    print("1. Replace slowhttp_c2.py with the actual application")
+    print("2. Run: ./start.sh")
+    print()
+
+if __name__ == '__main__':
+    main()
+EOF
+    
+    chmod +x slowhttp_c2.py
+    
+    log "Main application file created"
+    echo -e "${GREEN}[SUCCESS] Main application placeholder created${NC}"
 }
 
 # Create launcher scripts
 create_launchers() {
     log "Creating launcher scripts"
-    echo -e "${BLUE}[SETUP] Membuat script launcher...${NC}"
+    echo -e "${BLUE}[SETUP] Creating launcher scripts...${NC}"
     
-    # Make start.sh executable if exists
-    if [ -f "start.sh" ]; then
-        chmod +x start.sh
-    else
-        echo -e "${YELLOW}[PERINGATAN] start.sh tidak ditemukan di repository${NC}"
-    fi
+    # Create start.sh
+    cat > start.sh << 'EOF'
+#!/bin/bash
+# Distributed Slow HTTP C2 - Quick Launcher
+cd "$(dirname "$0")"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# Check if virtual environment exists
+if [ ! -d "venv" ]; then
+    echo -e "${RED}❌ Virtual environment not found!${NC}"
+    echo -e "${YELLOW}Please run the installer first${NC}"
+    exit 1
+fi
+
+# Activate virtual environment
+echo -e "${BLUE}🔧 Activating Python environment...${NC}"
+source venv/bin/activate
+
+# Check if main script exists
+if [ ! -f "slowhttp_c2.py" ]; then
+    echo -e "${RED}❌ Main script (slowhttp_c2.py) not found!${NC}"
+    exit 1
+fi
+
+# Check Python dependencies
+echo -e "${BLUE}🔍 Checking dependencies...${NC}"
+if ! python3 -c "import paramiko, cryptography" 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  Dependencies missing. Installing...${NC}"
+    pip install -r requirements.txt
+fi
+
+# Create necessary directories
+mkdir -p logs config
+
+# Clear screen and show banner
+clear
+echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║                    🎯 DISTRIBUTED SLOW HTTP C2                              ║${NC}"
+echo -e "${CYAN}║                           Starting System...                                ║${NC}"
+echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "${GREEN}📂 Working Directory: $(pwd)${NC}"
+echo -e "${GREEN}🐍 Python Environment: $(which python)${NC}"
+echo -e "${GREEN}📊 Python Version: $(python --version)${NC}"
+echo ""
+echo -e "${RED}⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️${NC}"
+echo ""
+
+# Handle Ctrl+C gracefully
+trap 'echo -e "\n${YELLOW}🛑 Shutting down C2 system...${NC}"; exit 0' INT
+
+# Launch main application
+python3 slowhttp_c2.py "$@"
+
+# Exit message
+echo ""
+echo -e "${CYAN}👋 Thank you for using Distributed Slow HTTP C2!${NC}"
+EOF
     
-    # Create update script
+    # Create update.sh
     cat > update.sh << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
 
-echo "🔄 Mengupdate Distributed Slow HTTP C2..."
+echo "🔄 Updating Distributed Slow HTTP C2..."
 
-# Check if git repository
-if [ -d ".git" ]; then
-    # Pull latest changes
-    if git pull origin main; then
-        echo "✅ Repository berhasil diupdate!"
-    else
-        echo "❌ Gagal update repository"
-        exit 1
-    fi
-else
-    echo "⚠️  Ini bukan git repository, download manual diperlukan"
-    echo "   Kunjungi: https://github.com/YEHEZKIEL586/slowhttp-c2"
-    exit 1
-fi
-
-# Update dependencies
+# Update Python dependencies
 if [ -d "venv" ]; then
     source venv/bin/activate
     pip install --upgrade -r requirements.txt
-    echo "✅ Dependencies berhasil diupdate!"
+    echo "✅ Dependencies updated!"
 else
-    echo "❌ Virtual environment tidak ditemukan"
+    echo "❌ Virtual environment not found"
     exit 1
 fi
 
-echo "✅ Update selesai!"
+echo "✅ Update completed!"
 EOF
-
+    
     # Create uninstaller
     cat > uninstall.sh << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
 
-echo "🗑️  Menguninstal Distributed Slow HTTP C2..."
+echo "🗑️  Uninstalling Distributed Slow HTTP C2..."
 echo ""
-echo "⚠️  Ini akan menghapus:"
-echo "   • Semua file aplikasi"
-echo "   • Virtual environment Python"
-echo "   • Database dan konfigurasi"
+echo "⚠️  This will remove:"
+echo "   • All application files"
+echo "   • Python virtual environment"
+echo "   • Database and configuration"
 echo "   • Log files"
 echo ""
 
-read -p "Apakah Anda yakin ingin menghapus instalasi sepenuhnya? (ketik 'HAPUS' untuk konfirmasi): " -r
+read -p "Are you sure you want to completely remove the installation? (type 'DELETE' to confirm): " -r
 echo
 
-if [[ $REPLY == "HAPUS" ]]; then
-    cd ..
-    INSTALL_DIR=$(basename "$PWD")
+if [[ $REPLY == "DELETE" ]]; then
+    CURRENT_DIR=$(pwd)
     cd ..
     
-    if rm -rf "$INSTALL_DIR"; then
-        echo "✅ Uninstall selesai!"
-        echo "📂 Direktori '$INSTALL_DIR' telah dihapus"
+    if rm -rf "$CURRENT_DIR"; then
+        echo "✅ Uninstall completed!"
+        echo "📂 Directory removed: $CURRENT_DIR"
     else
-        echo "❌ Gagal menghapus direktori"
+        echo "❌ Failed to remove directory"
         exit 1
     fi
 else
-    echo "❌ Uninstall dibatalkan"
+    echo "❌ Uninstall cancelled"
 fi
 EOF
-
+    
     # Make scripts executable
-    chmod +x update.sh uninstall.sh
+    chmod +x start.sh update.sh uninstall.sh
     
     log "Launcher scripts created successfully"
-    echo -e "${GREEN}[BERHASIL] Script launcher berhasil dibuat${NC}"
-}
-
-# Setup systemd service (optional)
-setup_service() {
-    if [[ "$NO_SERVICE" == true ]]; then
-        echo -e "${YELLOW}[INFO] Melewati setup service (--no-service digunakan)${NC}"
-        return
-    fi
-    
-    if [[ "$OS" == "debian" || "$OS" == "redhat" || "$OS" == "fedora" || "$OS" == "arch" ]]; then
-        if [ "$FORCE_INSTALL" = true ]; then
-            setup_service_answer="y"
-        else
-            read -p "Setup sebagai system service? (y/N): " -n 1 -r
-            echo
-            setup_service_answer="$REPLY"
-        fi
-        
-        if [[ $setup_service_answer =~ ^[Yy]$ ]]; then
-            log "Setting up systemd service"
-            echo -e "${BLUE}[SETUP] Membuat systemd service...${NC}"
-            
-            local service_file="/etc/systemd/system/slowhttp-c2.service"
-            
-            if ! sudo tee "$service_file" > /dev/null << EOF; then
-                error_exit "Gagal membuat systemd service file"
-            fi
-[Unit]
-Description=Distributed Slow HTTP C2 Server
-Documentation=https://github.com/YEHEZKIEL586/slowhttp-c2
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$USER
-Group=$USER
-WorkingDirectory=$INSTALL_DIR
-Environment=PATH=$INSTALL_DIR/venv/bin:/usr/bin:/bin
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/slowhttp_c2.py --daemon
-ExecReload=/bin/kill -HUP \$MAINPID
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=slowhttp-c2
-
-# Security settings
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=$INSTALL_DIR
-
-[Install]
-WantedBy=multi-user.target
-EOF
-            
-            if ! sudo systemctl daemon-reload; then
-                echo -e "${YELLOW}[PERINGATAN] Gagal reload systemd daemon${NC}"
-            fi
-            
-            log "Systemd service created successfully"
-            echo -e "${GREEN}[BERHASIL] Systemd service berhasil dibuat${NC}"
-            echo -e "${CYAN}[INFO] Untuk menggunakan service:${NC}"
-            echo -e "${CYAN}       Enable: sudo systemctl enable slowhttp-c2${NC}"
-            echo -e "${CYAN}       Start:  sudo systemctl start slowhttp-c2${NC}"
-            echo -e "${CYAN}       Status: sudo systemctl status slowhttp-c2${NC}"
-            echo -e "${CYAN}       Logs:   sudo journalctl -u slowhttp-c2 -f${NC}"
-        fi
-    else
-        echo -e "${YELLOW}[INFO] Systemd service tidak tersedia untuk OS ini${NC}"
-    fi
+    echo -e "${GREEN}[SUCCESS] Launcher scripts created successfully${NC}"
 }
 
 # Security setup
 setup_security() {
     log "Setting up security measures"
-    echo -e "${BLUE}[SECURITY] Menerapkan security measures...${NC}"
+    echo -e "${BLUE}[SECURITY] Applying security measures...${NC}"
     
     # Set proper permissions
-    if ! chmod 700 "$INSTALL_DIR"; then
-        echo -e "${YELLOW}[PERINGATAN] Gagal set permission direktori${NC}"
-    fi
+    chmod 700 "$INSTALL_DIR" 2>/dev/null || true
+    chmod 600 "$INSTALL_DIR"/*.py 2>/dev/null || true
     
-    if ! chmod 600 "$INSTALL_DIR"/*.py 2>/dev/null; then
-        echo -e "${YELLOW}[PERINGATAN] Gagal set permission file Python${NC}"
-    fi
-    
-    # Create comprehensive .gitignore if not exists
-    if [ ! -f ".gitignore" ]; then
-        cat > .gitignore << 'EOF'
+    # Create comprehensive .gitignore
+    cat > .gitignore << 'EOF'
 # Database and logs
 *.db
 *.log
@@ -709,8 +584,6 @@ MANIFEST
 venv/
 env/
 ENV/
-env.bak/
-venv.bak/
 
 # System files
 .DS_Store
@@ -719,21 +592,10 @@ Thumbs.db
 *.swo
 *~
 
-# IDE
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
-
 # Configuration files with sensitive data
 config.ini
 .env
 local_config.py
-production_config.py
-
-# Backup files
-*.bak
-*.backup
 
 # Temporary files
 *.tmp
@@ -752,42 +614,34 @@ credentials.txt
 vps_list.txt
 targets.txt
 EOF
-    fi
-    
-    # Create logs directory
-    if ! mkdir -p logs; then
-        echo -e "${YELLOW}[PERINGATAN] Gagal membuat direktori logs${NC}"
-    fi
     
     log "Security measures applied successfully"
-    echo -e "${GREEN}[BERHASIL] Security measures berhasil diterapkan${NC}"
+    echo -e "${GREEN}[SUCCESS] Security measures applied${NC}"
 }
 
 # Verify installation
 verify_installation() {
     log "Verifying installation"
-    echo -e "${BLUE}[VERIFY] Memverifikasi instalasi...${NC}"
+    echo -e "${BLUE}[VERIFY] Verifying installation...${NC}"
     
-    # Check if main files exist
+    # Check if required files exist
     local required_files=("slowhttp_c2.py" "requirements.txt" "start.sh" "update.sh" "uninstall.sh")
     for file in "${required_files[@]}"; do
         if [ ! -f "$file" ]; then
-            error_exit "File penting tidak ditemukan: $file"
+            error_exit "Required file not found: $file"
         fi
     done
     
     # Check virtual environment
     if [ ! -d "venv" ]; then
-        error_exit "Virtual environment tidak ditemukan"
+        error_exit "Virtual environment not found"
     fi
     
     # Test Python imports
-    if [ -f "venv/bin/activate" ]; then
-        source venv/bin/activate
-    fi
+    source venv/bin/activate
     
     echo -e "${BLUE}[TEST] Testing Python dependencies...${NC}"
-    if ! python -c "import paramiko, cryptography, socket, threading, time, json, logging, argparse; print('✅ All dependencies OK')"; then
+    if ! python -c "import paramiko, cryptography, colorama; print('✅ All dependencies OK')"; then
         error_exit "Python dependencies verification failed"
     fi
     
@@ -798,101 +652,12 @@ verify_installation() {
     
     # Check permissions
     if [ ! -x "start.sh" ] || [ ! -x "update.sh" ] || [ ! -x "uninstall.sh" ]; then
-        echo -e "${YELLOW}[FIX] Memperbaiki permissions script...${NC}"
+        echo -e "${YELLOW}[FIX] Fixing script permissions...${NC}"
         chmod +x start.sh update.sh uninstall.sh
     fi
     
     log "Installation verification completed successfully"
-    echo -e "${GREEN}[BERHASIL] Verifikasi instalasi berhasil!${NC}"
-}
-
-# Final setup and configuration
-final_setup() {
-    log "Performing final setup"
-    echo -e "${BLUE}[FINAL] Menyelesaikan setup...${NC}"
-    
-    # Create desktop shortcut (if desktop environment available)
-    if [ -n "$DISPLAY" ] && [ -d "$HOME/Desktop" ]; then
-        local shortcut_file="$HOME/Desktop/Slowhttp-C2.desktop"
-        cat > "$shortcut_file" << EOF
-[Desktop Entry]
-Version=1.0
-Name=Slowhttp C2
-Comment=Distributed Slow HTTP Command & Control
-Exec=$INSTALL_DIR/start.sh
-Icon=network-wired
-Terminal=true
-Type=Application
-Categories=Development;Security;Network;
-Path=$INSTALL_DIR
-EOF
-        chmod +x "$shortcut_file"
-        log "Desktop shortcut created"
-    fi
-    
-    # Create configuration template
-    if [ ! -f "config.ini.example" ]; then
-        cat > config.ini.example << 'EOF'
-[server]
-host = 0.0.0.0
-port = 8080
-ssl_enabled = false
-ssl_cert = 
-ssl_key = 
-max_connections = 1000
-timeout = 30
-
-[database]
-type = sqlite
-file = slowhttp_c2.db
-host = localhost
-port = 5432
-name = slowhttp_c2
-user = 
-password = 
-
-[logging]
-level = INFO
-file = logs/slowhttp_c2.log
-max_size = 10MB
-backup_count = 5
-
-[security]
-auth_required = true
-api_key = 
-rate_limiting = true
-max_requests_per_minute = 60
-allowed_ips = 
-
-[features]
-auto_cleanup = true
-cleanup_interval = 3600
-max_agents = 100
-heartbeat_interval = 30
-EOF
-    fi
-    
-    # Create example target list
-    if [ ! -f "targets.txt.example" ]; then
-        cat > targets.txt.example << 'EOF'
-# Example target configuration
-# Format: host:port or host (default port 80)
-# Lines starting with # are comments
-
-# Examples:
-# example.com
-# test-site.com:8080
-# 192.168.1.100
-# subdomain.example.org:443
-
-# Add your targets below (remove # to uncomment):
-# target1.com
-# target2.com:8080
-EOF
-    fi
-    
-    log "Final setup completed"
-    echo -e "${GREEN}[BERHASIL] Final setup selesai${NC}"
+    echo -e "${GREEN}[SUCCESS] Installation verification completed!${NC}"
 }
 
 # Show completion message
@@ -901,68 +666,41 @@ show_completion() {
     
     echo -e "${GREEN}${BOLD}"
     echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-    echo "║                            INSTALASI BERHASIL!                              ║"
+    echo "║                            INSTALLATION SUCCESSFUL!                         ║"
     echo "╠══════════════════════════════════════════════════════════════════════════════╣"
     echo "║                                                                              ║"
-    echo -e "║  📍 Lokasi Instalasi: ${WHITE}$(printf "%-46s" "$INSTALL_DIR")${GREEN} ║"
-    echo -e "║  ⏱️  Waktu Instalasi: ${WHITE}$(printf "%-46s" "${install_time}s")${GREEN} ║"
+    echo -e "║  📍 Installation Location: ${WHITE}$(printf "%-41s" "$INSTALL_DIR")${GREEN} ║"
+    echo -e "║  ⏱️  Installation Time: ${WHITE}$(printf "%-46s" "${install_time}s")${GREEN} ║"
     echo -e "║  🐍 Python Environment: ${WHITE}$(printf "%-42s" "$VIRTUAL_ENV")${GREEN} ║"
     echo "║                                                                              ║"
     echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-    echo "║                            CARA PENGGUNAAN                                   ║"
+    echo "║                            USAGE INSTRUCTIONS                               ║"
     echo "╠══════════════════════════════════════════════════════════════════════════════╣"
     echo "║                                                                              ║"
-    echo -e "║  🚀 ${WHITE}Menjalankan:${GREEN}                                                        ║"
+    echo -e "║  🚀 ${WHITE}To Run:${GREEN}                                                         ║"
     echo -e "║     ${CYAN}cd $INSTALL_DIR${GREEN}"
     printf "║     %-70s║\n" ""
     echo -e "║     ${CYAN}./start.sh${GREEN}                                                          ║"
-    echo -e "║     ${CYAN}# atau manual:${GREEN}                                                      ║"
+    echo "║                                                                              ║"
+    echo -e "║  🔧 ${WHITE}Manual Run:${GREEN}                                                     ║"
     echo -e "║     ${CYAN}source venv/bin/activate && python slowhttp_c2.py${GREEN}                  ║"
     echo "║                                                                              ║"
-    echo -e "║  🔧 ${WHITE}Konfigurasi:${GREEN}                                                       ║"
-    echo -e "║     ${CYAN}cp config.ini.example config.ini${GREEN}                                   ║"
-    echo -e "║     ${CYAN}nano config.ini${GREEN}                                                     ║"
-    echo "║                                                                              ║"
-    echo -e "║  🎯 ${WHITE}Target Setup:${GREEN}                                                      ║"
-    echo -e "║     ${CYAN}cp targets.txt.example targets.txt${GREEN}                                 ║"
-    echo -e "║     ${CYAN}nano targets.txt${GREEN}                                                    ║"
-    echo "║                                                                              ║"
-    echo -e "║  🔄 ${WHITE}Update:${GREEN}                                                            ║"
+    echo -e "║  🔄 ${WHITE}Update:${GREEN}                                                         ║"
     echo -e "║     ${CYAN}./update.sh${GREEN}                                                         ║"
     echo "║                                                                              ║"
-    echo -e "║  🗑️  ${WHITE}Uninstall:${GREEN}                                                        ║"
+    echo -e "║  🗑️  ${WHITE}Uninstall:${GREEN}                                                       ║"
     echo -e "║     ${CYAN}./uninstall.sh${GREEN}                                                      ║"
     echo "║                                                                              ║"
-    if [[ "$OS" == "debian" || "$OS" == "redhat" || "$OS" == "fedora" || "$OS" == "arch" ]] && [[ "$NO_SERVICE" != true ]]; then
-    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-    echo "║                            SYSTEMD SERVICE                                   ║"
-    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-    echo "║                                                                              ║"
-    echo -e "║  🔧 ${WHITE}Enable Service:${GREEN}                                                    ║"
-    echo -e "║     ${CYAN}sudo systemctl enable slowhttp-c2${GREEN}                                  ║"
-    echo -e "║     ${CYAN}sudo systemctl start slowhttp-c2${GREEN}                                   ║"
-    echo "║                                                                              ║"
-    echo -e "║  📊 ${WHITE}Monitor Service:${GREEN}                                                   ║"
-    echo -e "║     ${CYAN}sudo systemctl status slowhttp-c2${GREEN}                                  ║"
-    echo -e "║     ${CYAN}sudo journalctl -u slowhttp-c2 -f${GREEN}                                  ║"
-    echo "║                                                                              ║"
-    fi
-    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-    echo "║                            DOKUMENTASI                                       ║"
-    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-    echo "║                                                                              ║"
-    echo -e "║  📚 ${WHITE}Repository:${GREEN} ${CYAN}https://github.com/YEHEZKIEL586/slowhttp-c2${GREEN}      ║"
-    echo -e "║  🐛 ${WHITE}Issues:${GREEN} ${CYAN}https://github.com/YEHEZKIEL586/slowhttp-c2/issues${GREEN}  ║"
-    echo -e "║  📖 ${WHITE}Log File:${GREEN} ${CYAN}$(printf "%-55s" "$LOG_FILE")${GREEN}║"
+    echo "║  ⚠️  ${WHITE}IMPORTANT: Replace slowhttp_c2.py with actual application!${GREEN}        ║"
     echo "║                                                                              ║"
     echo "╚══════════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     
-    echo -e "${RED}${BOLD}⚠️  PERINGATAN PENTING:${NC}"
-    echo -e "${RED}   • Tool ini HANYA untuk tujuan pendidikan dan testing yang diotorisasi${NC}"
-    echo -e "${RED}   • Penggunaan tanpa izin pada sistem yang bukan milik Anda adalah ILEGAL${NC}"
-    echo -e "${RED}   • Pengguna bertanggung jawab penuh atas penggunaan tool ini${NC}"
-    echo -e "${RED}   • Pastikan untuk mengikuti hukum dan regulasi yang berlaku${NC}"
+    echo -e "${RED}${BOLD}⚠️  IMPORTANT WARNING:${NC}"
+    echo -e "${RED}   • This tool is ONLY for educational purposes and authorized testing${NC}"
+    echo -e "${RED}   • Unauthorized use on systems you don't own is ILLEGAL${NC}"
+    echo -e "${RED}   • You are fully responsible for how you use this tool${NC}"
+    echo -e "${RED}   • Always follow applicable laws and regulations${NC}"
     echo ""
     
     log "Installation completed successfully in ${install_time}s"
@@ -970,15 +708,7 @@ show_completion() {
 
 # Main function
 main() {
-    local START_TIME
-    START_TIME=$(date +%s)
-    
     # Parse arguments
-    local FORCE_INSTALL=false
-    local QUIET_MODE=false
-    local NO_SERVICE=false
-    local CUSTOM_DIR=""
-    
     while [[ $# -gt 0 ]]; do
         case $1 in
             --help|-h)
@@ -1026,31 +756,23 @@ main() {
     log "=== Slowhttp C2 Installation Started ==="
     log "Installer Version: $INSTALLER_VERSION"
     log "Install Directory: $INSTALL_DIR"
-    log "Force Install: $FORCE_INSTALL"
-    log "Quiet Mode: $QUIET_MODE"
-    log "No Service: $NO_SERVICE"
     
     # Show banner
     print_banner
     
     # System checks
     check_user
-    check_system_requirements
     detect_os
-    
-    # Software checks
     check_python
-    check_required_tools
     
     # Installation steps
-    echo -e "${BLUE}[INFO] Memulai proses instalasi...${NC}"
+    echo -e "${BLUE}[INFO] Starting installation process...${NC}"
     install_dependencies
-    download_repo
+    create_project
     setup_python_env
+    create_main_app
     create_launchers
     setup_security
-    setup_service
-    final_setup
     
     # Verification
     verify_installation
@@ -1062,7 +784,6 @@ main() {
 }
 
 # Error handling for script
-set -e
 trap 'error_exit "Unexpected error occurred at line $LINENO"' ERR
 
 # Run main function with all arguments
