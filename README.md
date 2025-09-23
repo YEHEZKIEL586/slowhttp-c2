@@ -21,12 +21,12 @@ This tool is for **EDUCATIONAL** and **AUTHORIZED PENETRATION TESTING** purposes
 
 ### One-Line Installation
 ```bash
-curl -sSL https://raw.githubusercontent.com/yourusername/slowhttp-c2/main/install.sh | bash
+curl -sSL https://github.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
 ```
 
 ### Manual Installation
 ```bash
-git clone https://github.com/yourusername/slowhttp-c2.git
+git clone https://github.com/YEHEZKIEL586/slowhttp-c2.git
 cd slowhttp-c2
 chmod +x install.sh
 ./install.sh
@@ -81,16 +81,16 @@ cd slowhttp-c2
 ### Automatic Installation
 ```bash
 # Download and run installer
-curl -sSL https://raw.githubusercontent.com/yourusername/slowhttp-c2/main/install.sh | bash
+curl -sSL https://github.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
 
 # Or with wget
-wget -qO- https://raw.githubusercontent.com/yourusername/slowhttp-c2/main/install.sh | bash
+wget -qO- https://github.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
 ```
 
 ### Manual Installation
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/slowhttp-c2.git
+git clone https://github.com/YEHEZKIEL586/slowhttp-c2.git
 cd slowhttp-c2
 
 # Run installer
@@ -144,7 +144,7 @@ Main Menu → [3] Monitor Attacks
 
 ```bash
 # Install
-curl -sSL https://raw.githubusercontent.com/yourusername/slowhttp-c2/main/install.sh | bash
+curl -sSL https://github.com/YEHEZKIEL586/slowhttp-c2/main/install.sh | bash
 
 # Start C2
 cd ~/slowhttp-c2
@@ -281,5 +281,6 @@ This tool is designed for:
 - Read [Documentation](docs/) for detailed guides
 
 ---
+
 
 **Remember**: Use responsibly and legally. Always obtain proper authorization before testing.
