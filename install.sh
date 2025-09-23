@@ -16,7 +16,7 @@ WHITE='\033[1;37m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO_URL="https://github.com/yourusername/slowhttp-c2.git"
+REPO_URL="https://github.com/YEHEZKIEL586/slowhttp-c2.git"
 INSTALL_DIR="$HOME/slowhttp-c2"
 PYTHON_MIN_VERSION="3.6"
 
@@ -122,7 +122,7 @@ install_dependencies() {
         "macos")
             if ! command -v brew &> /dev/null; then
                 echo -e "${BLUE}[INSTALL] Installing Homebrew...${NC}"
-                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/YEHEZKIEL586/slowhttp-c2/main/install.sh)"
             fi
             brew install python3 git curl wget
             ;;
