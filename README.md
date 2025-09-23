@@ -225,4 +225,61 @@ ssh root@your-vps-ip
 # Verifikasi credentials dan firewall settings
 ```
 
-**Python
+**Python Dependencies Error**
+```bash
+# Reinstall dependencies
+pip install --force-reinstall -r requirements.txt
+```
+
+**Attack Not Starting**
+```bash
+# Cek aksesibilitas target dari VPS
+ssh root@vps-ip "curl -I http://target.com"
+```
+
+Lihat [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) untuk solusi lebih lengkap.
+
+## 📚 **Dokumentasi**
+
+- [Panduan Instalasi](docs/INSTALLATION.md)
+- [Dokumentasi Penggunaan](docs/USAGE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Pedoman Hukum](docs/LEGAL.md)
+
+## 🤝 **Contributing**
+
+1. Fork repository
+2. Buat feature branch (`git checkout -b feature/fitur-keren`)
+3. Commit perubahan (`git commit -m 'Tambah fitur keren'`)
+4. Push ke branch (`git push origin feature/fitur-keren`)
+5. Buka Pull Request
+
+## 📄 **Lisensi**
+
+Project ini dilisensikan di bawah MIT License - lihat file [LICENSE](LICENSE) untuk detail.
+
+## ⚖️ **Pemberitahuan Hukum**
+
+Tool ini dirancang untuk:
+- Tujuan pendidikan dan pembelajaran
+- Authorized penetration testing
+- Riset keamanan dalam lingkungan terkontrol
+- Testing ketahanan infrastruktur
+
+**Penting**: Selalu pastikan Anda memiliki izin eksplisit sebelum testing sistem apa pun. Akses tidak sah ke sistem komputer adalah ilegal di sebagian besar yurisdiksi.
+
+## 🙏 **Acknowledgments**
+
+- Dibuat untuk pendidikan cybersecurity dan authorized testing
+- Terinspirasi oleh legitimate security testing tools
+- Terima kasih kepada komunitas keamanan open-source
+
+## 📞 **Support**
+
+- Buat [Issue](https://github.com/YEHEZKIEL586/slowhttp-c2/issues) untuk bugs
+- [Discussions](https://github.com/YEHEZKIEL586/slowhttp-c2/discussions) untuk pertanyaan
+- Baca [Dokumentasi](docs/) untuk panduan detail
+
+---
+
+**Ingat**: Gunakan secara bertanggung jawab dan legal. Selalu dapatkan otorisasi yang tepat sebelum testing.
