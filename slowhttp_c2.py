@@ -725,6 +725,9 @@ class AttackManager:
         
         for vps_ip in vps_list:
             print(f"{Colors.CYAN}[LAUNCHING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
+            # LOG
+            if not self.ssh_manager.get_connection_status(vps_ip):
+                print(f"{Colors.YELLOW}RECONNECTING...{Colors.RESET} ", end="", flush=True)
             
             # Better command building with validation
             cmd = self._build_attack_command_fixed(target_url, attack_type, parameters)
@@ -1572,3 +1575,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
