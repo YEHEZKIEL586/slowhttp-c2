@@ -74,7 +74,7 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
         
-        # VPS nodes table
+        # VPS nodes table - TANPA agent_deployed dan attack_count
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vps_nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,13 +86,11 @@ class DatabaseManager:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP,
                 location TEXT,
-                capabilities TEXT,
-                agent_deployed BOOLEAN DEFAULT 0,
-                attack_count INTEGER DEFAULT 0
+                capabilities TEXT
             )
         ''')
         
-        # Attack sessions table - TANPA total_connections
+        # Attack sessions table - TANPA total_connections dan success_rate
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS attack_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,27 +164,18 @@ class DatabaseManager:
         conn.close()
         return vps_list
     
-    def update_vps_status(self, ip, status, agent_deployed=None):
+    def update_vps_status(self, ip, status):
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
-        
-        query = 'UPDATE vps_nodes SET status = ?, last_seen = ?'
-        params = [status, datetime.now().isoformat()]
-        
-        if agent_deployed is not None:
-            query += ', agent_deployed = ?'
-            params.append(agent_deployed)
-        
-        query += ' WHERE ip_address = ?'
-        params.append(ip)
-        
-        cursor.execute(query, params)
+        cursor.execute('''
+            UPDATE vps_nodes SET status = ?, last_seen = ? WHERE ip_address = ?
+        ''', (status, datetime.now().isoformat(), ip))
         conn.commit()
         conn.close()
     
     def remove_vps(self, ip):
         conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
+        cursor = cursor = conn.cursor()
         cursor.execute('DELETE FROM vps_nodes WHERE ip_address = ?', (ip,))
         affected_rows = cursor.rowcount
         conn.commit()
@@ -1183,17 +1172,15 @@ class SlowHTTPTUI:
             print("=" * 50)
             
             if vps_list:
-                print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8} {'Location':<15} {'Last Seen'}")
-                print("-" * 85)
+                print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Location':<15} {'Last Seen'}")
+                print("-" * 80)
                 
                 for vps in vps_list:
                     status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
-                    agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
-                    agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
                     last_seen = vps[7][:19] if vps[7] else 'Never'
                     location = vps[8] if vps[8] else 'Unknown'
                     
-                    print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET} {location:<15} {last_seen}")
+                    print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {location:<15} {last_seen}")
             else:
                 print(f"\n{Colors.YELLOW}No VPS nodes configured{Colors.RESET}")
             
@@ -1265,8 +1252,7 @@ class SlowHTTPTUI:
                 success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port)
                 
                 status = 'online' if success else 'offline'
-                agent_deployed = success  # Mark as deployed if connection successful
-                self.db_manager.update_vps_status(ip, status, agent_deployed)
+                self.db_manager.update_vps_status(ip, status)
                 
                 if success:
                     print(f"{Colors.GREEN}[SUCCESS] Connection test passed{Colors.RESET}")
@@ -1310,11 +1296,11 @@ class SlowHTTPTUI:
             if success:
                 print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
                 success_count += 1
-                self.db_manager.update_vps_status(ip, 'online', True)
+                self.db_manager.update_vps_status(ip, 'online')
             else:
                 print(f"{Colors.RED}FAILED{Colors.RESET}")
                 failed_connections.append(f"{ip}: {message}")
-                self.db_manager.update_vps_status(ip, 'offline', False)
+                self.db_manager.update_vps_status(ip, 'offline')
         
         print(f"\n{Colors.BOLD}CONNECTION TEST RESULTS{Colors.RESET}")
         print("=" * 40)
@@ -1366,11 +1352,11 @@ class SlowHTTPTUI:
             if deploy_success:
                 print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
                 success_count += 1
-                self.db_manager.update_vps_status(ip, 'online', True)
+                self.db_manager.update_vps_status(ip, 'online')
             else:
                 print(f"{Colors.RED}FAILED{Colors.RESET}")
                 failed_deployments.append(f"{ip}: {deploy_msg}")
-                self.db_manager.update_vps_status(ip, 'offline', False)
+                self.db_manager.update_vps_status(ip, 'offline')
         
         print(f"\n{Colors.BOLD}AGENT DEPLOYMENT RESULTS{Colors.RESET}")
         print("=" * 50)
@@ -1396,16 +1382,14 @@ class SlowHTTPTUI:
         print(f"\n{Colors.BOLD}REMOVE VPS NODE{Colors.RESET}")
         print("=" * 30)
         
-        print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8} {'Location':<15}")
-        print("-" * 75)
+        print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Location':<15}")
+        print("-" * 65)
         
         for vps in vps_list:
             status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
-            agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
-            agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
             location = vps[8] if vps[8] else 'Unknown'
             
-            print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET} {location:<15}")
+            print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {location:<15}")
         
         try:
             choice = input(f"\n{Colors.CYAN}Enter VPS ID to remove (or 0 to cancel): {Colors.RESET}").strip()
@@ -1455,16 +1439,14 @@ class SlowHTTPTUI:
         print(f"\n{Colors.BOLD}TEST SINGLE VPS CONNECTION{Colors.RESET}")
         print("=" * 40)
         
-        print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8} {'Location':<15}")
-        print("-" * 75)
+        print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Location':<15}")
+        print("-" * 65)
         
         for vps in vps_list:
             status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
-            agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
-            agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
             location = vps[8] if vps[8] else 'Unknown'
             
-            print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET} {location:<15}")
+            print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {location:<15}")
         
         try:
             choice = input(f"\n{Colors.CYAN}Enter VPS ID to test (or 0 to cancel): {Colors.RESET}").strip()
@@ -1483,7 +1465,7 @@ class SlowHTTPTUI:
                 
                 if success:
                     print(f"{Colors.GREEN}[SUCCESS] Connection to {ip} established{Colors.RESET}")
-                    self.db_manager.update_vps_status(ip, 'online', True)
+                    self.db_manager.update_vps_status(ip, 'online')
                     
                     # Test command execution
                     print(f"{Colors.CYAN}[EXECUTING] Test command...{Colors.RESET}")
@@ -1495,7 +1477,7 @@ class SlowHTTPTUI:
                         print(f"{Colors.RED}[ERROR] Command failed: {test_output}{Colors.RESET}")
                 else:
                     print(f"{Colors.RED}[FAILED] Connection to {ip} failed: {message}{Colors.RESET}")
-                    self.db_manager.update_vps_status(ip, 'offline', False)
+                    self.db_manager.update_vps_status(ip, 'offline')
             else:
                 print(f"{Colors.RED}[ERROR] Invalid VPS ID{Colors.RESET}")
                 
@@ -1533,15 +1515,12 @@ class SlowHTTPTUI:
             print(f"\n{Colors.BOLD}SELECT VPS NODES{Colors.RESET}")
             print("-" * 30)
             
-            print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10} {'Agent':<8}")
-            print("-" * 60)
+            print(f"\n{'ID':<4} {'IP Address':<15} {'Username':<12} {'Status':<10}")
+            print("-" * 50)
             
             for vps in vps_list:
                 status_color = Colors.GREEN if vps[5] == 'online' else Colors.RED
-                agent_color = Colors.GREEN if len(vps) > 10 and vps[10] else Colors.RED
-                agent_status = "YES" if len(vps) > 10 and vps[10] else "NO"
-                
-                print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET} {agent_color}{agent_status:<8}{Colors.RESET}")
+                print(f"{vps[0]:<4} {vps[1]:<15} {vps[2]:<12} {status_color}{vps[5]:<10}{Colors.RESET}")
             
             vps_selection = input(f"\n{Colors.CYAN}Enter VPS IDs (comma-separated, or 'all' for all): {Colors.RESET}").strip()
             
@@ -1821,13 +1800,11 @@ class SlowHTTPTUI:
         # VPS status
         vps_list = self.db_manager.get_all_vps()
         online_vps = sum(1 for vps in vps_list if vps[5] == 'online')
-        deployed_vps = sum(1 for vps in vps_list if len(vps) > 10 and vps[10])
         
         print(f"\n{Colors.CYAN}VPS NODES:{Colors.RESET}")
         print(f"  Total: {len(vps_list)}")
         print(f"  Online: {Colors.GREEN}{online_vps}{Colors.RESET}")
         print(f"  Offline: {Colors.RED}{len(vps_list) - online_vps}{Colors.RESET}")
-        print(f"  Agents Deployed: {Colors.GREEN}{deployed_vps}{Colors.RESET}")
         
         # Active attacks
         active_attacks = len(self.attack_manager.active_attacks)
