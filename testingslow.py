@@ -31,6 +31,7 @@ import logging
 import hashlib
 import re
 import ipaddress
+import select  # Added missing import
 
 # Initialize colorama for cross-platform colored output
 colorama.init(autoreset=True)
@@ -2298,14 +2299,46 @@ class SlowHTTPTUI:
                 
                 print(f"\n{Colors.PURPLE}[CONTROLS] Press Ctrl+C to stop monitoring | Press 's' + Enter to stop attack{Colors.RESET}")
                 
-                # Check for user input with timeout
-                rlist, _, _ = select.select([sys.stdin], [], [], 5)
-                if rlist:
-                    user_input = sys.stdin.readline().strip().lower()
-                    if user_input == 's':
-                        print(f"{Colors.YELLOW}Stopping attack...{Colors.RESET}")
-                        self.attack_manager.stop_attack(session_id)
-                        break
+                # Non-blocking input check using select
+                # This is the part that needs to be fixed
+                # Instead of using select, we'll use a simple timeout approach
+                print("Press 's' + Enter to stop attack or wait 5 seconds for update...", end="", flush=True)
+                
+                # Simple timeout approach
+                start_time = time.time()
+                user_input = ""
+                
+                # Set stdin to non-blocking mode
+                import fcntl
+                import termios
+                
+                # Save original terminal settings
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+                
+                try:
+                    # Set stdin to non-blocking
+                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                    
+                    # Check for input with timeout
+                    while time.time() - start_time < 5:
+                        try:
+                            char = sys.stdin.read(1)
+                            if char:
+                                user_input += char
+                                if char == '\n' and 's' in user_input.lower():
+                                    print(f"{Colors.YELLOW}Stopping attack...{Colors.RESET}")
+                                    self.attack_manager.stop_attack(session_id)
+                                    break
+                        except IOError:
+                            pass
+                        time.sleep(0.1)
+                finally:
+                    # Restore terminal settings
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    
+                print("\r" + " " * 60 + "\r", end="")  # Clear the line
                 
             # If we got here and the attack is no longer active, it might have completed
             if session_id not in self.attack_manager.active_attacks:
