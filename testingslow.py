@@ -3848,7 +3848,7 @@ class AttackManager:
         cmd = "cd ~/slowhttp_agent && nohup python3 agent.py "
         
         # Add target
-        cmd += f"--target "{target_url}""
+        cmd += f"--target {target_url}"
         
         # Add attack type
         cmd += f"--attack-type {attack_type} "
